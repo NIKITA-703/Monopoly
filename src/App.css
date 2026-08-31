@@ -616,6 +616,7 @@
   z-index: 40;
   top: 0;
   left: 0;
+  opacity: 0;
   width: 46px;
   height: 46px;
   margin: 0;

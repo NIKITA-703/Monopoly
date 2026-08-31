@@ -1694,10 +1694,15 @@ function App({
         }
         if (!flyingToken) return
 
+        const startTransform = `translate(${start.x - movementTokenRadius}px, ${start.y - movementTokenRadius}px) scale(1.08)`
+        const destinationTransform = `translate(${destination.x - movementTokenRadius}px, ${destination.y - movementTokenRadius}px) scale(1.08)`
+        flyingToken.style.transform = startTransform
+        flyingToken.style.opacity = '1'
+
         const animation = flyingToken.animate(
           [
-            { transform: `translate(${start.x - movementTokenRadius}px, ${start.y - movementTokenRadius}px) scale(1.08)` },
-            { transform: `translate(${destination.x - movementTokenRadius}px, ${destination.y - movementTokenRadius}px) scale(1.08)` },
+            { transform: startTransform },
+            { transform: destinationTransform },
           ],
           {
             duration: Math.max(400, travelDistance / (movementPixelsPerMillisecond * speedMultiplier)),
@@ -1711,6 +1716,7 @@ function App({
         } catch {
           // Resize/unmount can cancel a Web Animation; the game still finishes the move.
         } finally {
+          flyingToken.style.transform = destinationTransform
           animation.cancel()
         }
       }
@@ -2192,6 +2198,14 @@ function App({
         }
         if (!flyingToken) return
 
+        const startPoint = points[0]
+        const destinationPoint = points.at(-1)
+        if (!startPoint || !destinationPoint) return
+        const startTransform = `translate(${startPoint.x - movementTokenRadius}px, ${startPoint.y - movementTokenRadius}px) scale(1.08)`
+        const destinationTransform = `translate(${destinationPoint.x - movementTokenRadius}px, ${destinationPoint.y - movementTokenRadius}px) scale(1.08)`
+        flyingToken.style.transform = startTransform
+        flyingToken.style.opacity = '1'
+
         const animation = flyingToken.animate(
           points.map((point, index) => ({
             transform: `translate(${point.x - movementTokenRadius}px, ${point.y - movementTokenRadius}px) scale(1.08)`,
@@ -2209,6 +2223,7 @@ function App({
         } catch {
           // Resize/unmount can cancel a Web Animation; the game still finishes the move.
         } finally {
+          flyingToken.style.transform = destinationTransform
           animation.cancel()
         }
       } else {
