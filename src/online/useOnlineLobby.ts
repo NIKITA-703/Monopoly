@@ -46,6 +46,18 @@ export function useOnlineLobby() {
   useEffect(() => {
     let disposed = false
     let reconnectDelay = 500
+    const applyDeferredStateWithoutAnimation = () => {
+      if (document.visibilityState !== 'hidden') return
+      pendingGameEventIdsRef.current.clear()
+      setGameEvents([])
+      const deferredState = deferredGameStateRef.current
+      deferredGameStateRef.current = null
+      if (deferredState) {
+        setTurnDeadline(deferredState.turnDeadline)
+        setGameState(deferredState)
+      }
+    }
+    document.addEventListener('visibilitychange', applyDeferredStateWithoutAnimation)
     // Старые версии хранили один токен на весь браузер. Из-за этого две вкладки
     // управляли одним игроком. Переносим старый токен в текущую вкладку один раз,
     // после чего каждая новая вкладка будет получать уже собственную сессию.
@@ -191,6 +203,14 @@ export function useOnlineLobby() {
           // stream. Keep only the newest snapshot until every queued animation
           // finishes, so dialogs, money and logs cannot overtake the token.
           if (pendingGameEventIdsRef.current.size > 0) {
+            if (document.visibilityState === 'hidden') {
+              pendingGameEventIdsRef.current.clear()
+              deferredGameStateRef.current = null
+              setGameEvents([])
+              setTurnDeadline(message.turnDeadline)
+              setGameState(message)
+              return
+            }
             if (!deferredGameStateRef.current || message.revision > deferredGameStateRef.current.revision) {
               deferredGameStateRef.current = message
             }
@@ -205,6 +225,10 @@ export function useOnlineLobby() {
           return
         }
         if (message.type === 'turn_timeout') {
+          socket.send(JSON.stringify({ type: 'turn_timeout_claim', timeoutId: message.timeoutId }))
+          return
+        }
+        if (message.type === 'turn_timeout_granted') {
           pendingTimeoutIdRef.current = message.timeoutId
           setTurnTimeout({ timeoutId: message.timeoutId, actorId: message.actorId })
           return
@@ -215,11 +239,12 @@ export function useOnlineLobby() {
             receivedGameEventIdsRef.current.has(message.eventId)
           ) return
           receivedGameEventIdsRef.current.add(message.eventId)
-          pendingGameEventIdsRef.current.add(message.eventId)
           if (receivedGameEventIdsRef.current.size > 200) {
             const oldestEventId = receivedGameEventIdsRef.current.values().next().value
             if (oldestEventId) receivedGameEventIdsRef.current.delete(oldestEventId)
           }
+          if (document.visibilityState === 'hidden') return
+          pendingGameEventIdsRef.current.add(message.eventId)
           setGameEvents((events) => [
             ...events,
             { nonce: message.eventId, senderId: message.senderId, event: message.event },
@@ -247,6 +272,7 @@ export function useOnlineLobby() {
     connect()
     return () => {
       disposed = true
+      document.removeEventListener('visibilitychange', applyDeferredStateWithoutAnimation)
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
       socketRef.current?.close()
     }

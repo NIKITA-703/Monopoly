@@ -2434,6 +2434,25 @@ button.secondary {
   text-align: center;
 }
 
+.trade-total-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 14px;
+  margin-top: 12px;
+  color: #8795a2;
+  font-size: 13px;
+}
+
+.trade-total-breakdown span {
+  display: inline-flex;
+  gap: 5px;
+}
+
+.trade-total-breakdown b {
+  color: #dce5eb;
+}
+
 .trade-total {
   display: flex;
   align-items: center;

@@ -174,7 +174,7 @@ command -v node
 ```bash
 sudo useradd --system --home /opt/monopoly --shell /usr/sbin/nologin monopoly
 sudo mkdir -p /opt/monopoly /var/lib/monopoly
-sudo git clone <REPOSITORY_URL> /opt/monopoly
+sudo git clone https://github.com/NIKITA-703/Monopoly.git /opt/monopoly
 sudo chown -R monopoly:monopoly /opt/monopoly /var/lib/monopoly
 ```
 
@@ -199,6 +199,7 @@ Production-конфигурация должна выглядеть пример
 
 ```dotenv
 GAME_PASSWORD=замените-на-длинный-пароль
+SESSION_SECRET=замените-на-длинную-случайную-строку
 HOST=127.0.0.1
 PORT=3001
 TURN_SECONDS=70
@@ -268,16 +269,90 @@ sudo certbot renew --dry-run
 
 ## Обновление приложения на VPS
 
+Лучше обновлять приложение между партиями. Перезапуск сервера кратковременно разрывает WebSocket-соединения; состояние комнаты и партии хранится в SQLite и не удаляется при обычном обновлении.
+
+### 1. Отправьте изменения в GitHub с компьютера
+
+В каталоге проекта проверьте изменения, выполните проверки и отправьте коммит:
+
 ```bash
-cd /opt/monopoly
-sudo -u monopoly git pull --ff-only
-sudo -u monopoly npm ci
-sudo -u monopoly npm run build
-sudo systemctl restart monopoly
-sudo systemctl status monopoly
+git status
+npm run lint
+npm run build
+npm run test:online
+git add -A
+git commit -m "Описание обновления"
+git push origin main
 ```
 
-Изменения только в React/CSS тоже требуют новой сборки `npm run build`. Изменения сервера или переменных окружения требуют перезапуска systemd-службы.
+Если коммит уже создан и отправлен, повторять `git add` и `git commit` не нужно.
+
+### 2. Проверьте состояние проекта на VPS
+
+Подключитесь к серверу по SSH и убедитесь, что непосредственно на VPS никто не редактировал файлы проекта:
+
+```bash
+sudo -u monopoly git -C /opt/monopoly status --short
+```
+
+Команда должна ничего не вывести. Если появились изменённые файлы, сначала разберитесь, откуда они взялись. Не выполняйте `git reset --hard`: он удалит эти изменения.
+
+### 3. Подтяните и соберите обновление
+
+```bash
+sudo -u monopoly git -C /opt/monopoly fetch origin
+sudo -u monopoly git -C /opt/monopoly pull --ff-only origin main
+cd /opt/monopoly
+sudo -u monopoly npm ci
+sudo -u monopoly npm run build
+```
+
+`npm ci` приводит зависимости в точное соответствие с `package-lock.json`. Выполнять его при каждом обновлении безопасно, даже если зависимости не менялись.
+
+### 4. Перезапустите приложение и проверьте его
+
+```bash
+sudo systemctl restart monopoly
+sudo systemctl status monopoly --no-pager
+curl --fail http://127.0.0.1:3001/api/health
+sudo journalctl -u monopoly -n 50 --no-pager
+```
+
+Ожидаемый ответ проверки здоровья:
+
+```json
+{"ok":true}
+```
+
+После этого обновите страницу игры в браузере. Изменения React/CSS требуют выполнения `npm run build`, а изменения Node.js-сервера — перезапуска службы. В приведённой инструкции всегда выполняются оба действия, поэтому она подходит для любого обновления.
+
+### Если изменились файлы развёртывания
+
+Если обновлялся `deploy/monopoly.service`, повторно установите его:
+
+```bash
+sudo cp /opt/monopoly/deploy/monopoly.service /etc/systemd/system/monopoly.service
+sudo systemctl daemon-reload
+sudo systemctl restart monopoly
+```
+
+Если обновлялся `deploy/nginx.conf`, сравните его со своей production-конфигурацией, сохраните правильный домен и примените:
+
+```bash
+sudo cp /opt/monopoly/deploy/nginx.conf /etc/nginx/sites-available/monopoly
+sudo nano /etc/nginx/sites-available/monopoly
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+### Быстро посмотреть доступные обновления без установки
+
+```bash
+sudo -u monopoly git -C /opt/monopoly fetch origin
+sudo -u monopoly git -C /opt/monopoly log --oneline HEAD..origin/main
+```
+
+Каталог `/var/lib/monopoly` и файл `/etc/monopoly.env` находятся вне Git-репозитория, поэтому `git pull` и `npm ci` их не затрагивают.
 
 ## Данные и резервное копирование
 

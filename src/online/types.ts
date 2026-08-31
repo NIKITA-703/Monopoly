@@ -34,4 +34,5 @@ export type ServerMessage =
   | { type: 'game_state'; gameId: string; revision: number; turnDeadline: number | null; senderId?: string | null; state: unknown }
   | { type: 'turn_deadline'; gameId: string; turnDeadline: number | null }
   | { type: 'turn_timeout'; gameId: string; turnKey: string; timeoutId: string; actorId: string | null }
+  | { type: 'turn_timeout_granted'; gameId: string; turnKey: string; timeoutId: string; actorId: string | null }
   | { type: 'game_event'; gameId: string; eventId: string; senderId: string; event: OnlineGameEvent }

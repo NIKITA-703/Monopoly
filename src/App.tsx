@@ -2876,18 +2876,19 @@ function App({
                   ? 'requested'
                   : null
               : null
-            const isTradeSelected = Boolean(
-              tradeDraft &&
-              (tradeSelectionSide === 'offered'
-                ? tradeDraft.offeredTileIds.includes(tile.id)
-                : tradeSelectionSide === 'requested' && tradeDraft.requestedTileIds.includes(tile.id)),
-            )
+            const tradeDisplaySide = tradeDraft?.offeredTileIds.includes(tile.id)
+              ? 'offered'
+              : tradeDraft?.requestedTileIds.includes(tile.id)
+                ? 'requested'
+                : null
+            const isTradeSelected = tradeDisplaySide !== null
+            const tradeColorSide = tradeDisplaySide ?? tradeSelectionSide
             const style = {
               ...tilePosition(tile.id),
               '--tile-tone': getTileTone(tile),
               '--owner-color': ownerPlayer?.color ?? 'transparent',
               '--trade-color':
-                tradeSelectionSide === 'offered' ? activePlayer.color : tradeTarget?.color ?? 'transparent',
+                tradeColorSide === 'offered' ? activePlayer.color : tradeTarget?.color ?? 'transparent',
               '--trade-history-color': tradeHistoryColor ?? 'transparent',
               '--selected-tile-color': getTileTone(tile),
               '--group-preview-color': tile.group ? groupColors[tile.group] : 'transparent',
@@ -2896,6 +2897,7 @@ function App({
 
             const openTile = () => {
               if (tile.type !== 'brand') return
+              if (tradeDraft?.stage === 'review') return
 
               if (canLocalPlayerEditTradeDraft && tradeSelectionSide) {
                 toggleTradeTile(tradeSelectionSide, tile.id)
@@ -2908,7 +2910,7 @@ function App({
 
             return (
               <div
-                className={`tile ${tile.type} side-${side} ${isCorner ? 'corner' : ''} ${owner ? 'owned' : ''} ${isMortgaged ? 'mortgaged' : ''} ${isPendingPaymentTile ? 'payment-due' : ''} ${isActivePlayerTile ? 'active-player-tile' : ''} ${owner && hoveredOwnerId === owner ? 'owner-preview' : ''} ${tradeHistoryColor ? 'trade-history-preview' : ''} ${isSelectedProperty ? 'selected-property' : ''} ${isGroupPreview ? 'group-preview' : ''} ${tradeSelectionSide ? 'trade-selectable' : ''} ${isTradeSelected ? `trade-selected trade-${tradeSelectionSide}` : ''} image-${tile.imageMode ?? 'contain'}`}
+                className={`tile ${tile.type} side-${side} ${isCorner ? 'corner' : ''} ${owner ? 'owned' : ''} ${isMortgaged ? 'mortgaged' : ''} ${isPendingPaymentTile ? 'payment-due' : ''} ${isActivePlayerTile ? 'active-player-tile' : ''} ${owner && hoveredOwnerId === owner ? 'owner-preview' : ''} ${tradeHistoryColor ? 'trade-history-preview' : ''} ${isSelectedProperty ? 'selected-property' : ''} ${isGroupPreview ? 'group-preview' : ''} ${tradeSelectionSide ? 'trade-selectable' : ''} ${isTradeSelected ? `trade-selected trade-${tradeDisplaySide}` : ''} image-${tile.imageMode ?? 'contain'}`}
                 key={tile.id}
                 data-tile-id={tile.id}
                 style={style}
@@ -3413,8 +3415,12 @@ function App({
                           <p>Выберите поле на доске</p>
                         )}
                       </div>
+                      <div className="trade-total-breakdown" aria-label="Расчёт стоимости предложения">
+                        <span>Поля <b>{money(selectedPropertyValue)}</b></span>
+                        <span>Деньги <b>{money(tradeDraft[column.moneyKey])}</b></span>
+                      </div>
                       <div className="trade-total">
-                        <span>Общая стоимость</span>
+                        <span>Итого отдаёт</span>
                         <b>{money(tradeSideTotal)}</b>
                       </div>
                     </div>
