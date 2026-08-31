@@ -5,7 +5,6 @@ import { randomIntInclusive, rollComplexDice } from './random/randomEngine'
 import type { DiceRoll, LogEntry, Player, Tile, TradeLogDetails } from './types'
 import type { OnlineGameEvent } from './online/types'
 
-const startBonus = 2000
 const casinoBet = 1000
 const initialCasinoJackpot = 2000
 const casinoJackpotStep = 250
@@ -30,6 +29,17 @@ const gameSceneHeight = 1240
 const fullHdGameSceneHeight = 1140
 const movementPixelsPerMillisecond = 0.53
 const fallbackMovementDurationPerTile = 220
+const movementTokenRadius = 23
+const maxTradeRequestsPerTurn = 3
+const startBonusForLap = (lapNumber: number) => {
+  if (lapNumber <= 30) return 2000
+  if (lapNumber <= 35) return 1000
+  if (lapNumber <= 40) return 500
+  return 0
+}
+const turnSoundUrl = new URL('./assets/audio/turn-start.wav', import.meta.url).href
+const tradeSoundUrl = new URL('./assets/audio/trade-request.wav', import.meta.url).href
+const turnWarningSoundUrl = new URL('./assets/audio/turn-warning.wav', import.meta.url).href
 
 type AuctionState = {
   tileId: number
@@ -99,6 +109,8 @@ export type OnlineGameState = {
   upgradedGroupsThisTurn: string[]
   playerEffects: Record<string, PlayerEffects>
   lapCounts: Record<string, number>
+  tradeRequestsThisTurn: number
+  missedTurnCounts: Record<string, number>
   eliminatedPlayerIds: string[]
   winnerId: string | null
 }
@@ -289,7 +301,15 @@ function CasinoDie({ value, selected = false }: { value: number; selected?: bool
 const getUpgradeCost = (tile: Tile) => groupUpgradeCosts[tile.group ?? ''] ?? 0
 const getMortgageValue = (tile: Tile) => Math.round((tile.price ?? 0) * 0.5)
 const getRedemptionCost = (tile: Tile) => Math.round((tile.price ?? 0) * 0.6)
-const getStarSaleValue = (tile: Tile) => Math.round(getUpgradeCost(tile) * 0.5)
+const getStarSaleValue = (tile: Tile) => Math.round((getUpgradeCost(tile) * 0.75) / 10) * 10
+
+const canMortgageProperty = (tile: Tile, levels: Record<number, number>) => {
+  if ((levels[tile.id] ?? 0) > 0) return false
+  if (!tile.group) return true
+  return brandTiles
+    .filter((candidate) => candidate.group === tile.group)
+    .every((candidate) => (levels[candidate.id] ?? 0) === 0)
+}
 
 const canUpgradePropertyEvenly = (tile: Tile, levels: Record<number, number>) => {
   if (!tile.group) return false
@@ -377,12 +397,14 @@ type AppProps = {
   localPlayerId?: string
   onlineState?: { revision: number; state: OnlineGameState } | null
   publishOnlineState?: (state: OnlineGameState) => void
+  beginOnlineTurnAction?: () => void
   turnDeadline?: number | null
-  turnTimeoutSignal?: { nonce: number; actorId: string | null } | null
+  turnTimeoutSignal?: { timeoutId: string; actorId: string | null } | null
   onReturnToLobby?: () => void
   sendOnlineChat?: (text: string) => void
   disconnectedPlayerIds?: string[]
   onlineGameEvent?: { nonce: string; senderId: string; event: OnlineGameEvent } | null
+  acknowledgeOnlineGameEvent?: (eventId: string) => void
   sendOnlineGameEvent?: (event: OnlineGameEvent) => void
 }
 
@@ -391,12 +413,14 @@ function App({
   localPlayerId,
   onlineState,
   publishOnlineState,
+  beginOnlineTurnAction,
   turnDeadline,
   turnTimeoutSignal,
   onReturnToLobby,
   sendOnlineChat,
   disconnectedPlayerIds = [],
   onlineGameEvent,
+  acknowledgeOnlineGameEvent,
   sendOnlineGameEvent,
 }: AppProps) {
   const [players, setPlayers] = useState<Player[]>(initialGamePlayers)
@@ -432,24 +456,44 @@ function App({
   const [upgradedGroupsThisTurn, setUpgradedGroupsThisTurn] = useState<string[]>([])
   const [playerEffects, setPlayerEffects] = useState<Record<string, PlayerEffects>>({})
   const [lapCounts, setLapCounts] = useState<Record<string, number>>({})
+  const [tradeRequestsThisTurn, setTradeRequestsThisTurn] = useState(0)
+  const [missedTurnCounts, setMissedTurnCounts] = useState<Record<string, number>>({})
   const [eliminatedPlayerIds, setEliminatedPlayerIds] = useState<string[]>([])
   const [winnerId, setWinnerId] = useState<string | null>(null)
   const boardRef = useRef<HTMLDivElement | null>(null)
+  const movingTokenRef = useRef<HTMLSpanElement | null>(null)
   const logListRef = useRef<HTMLDivElement | null>(null)
   const keepLogPinnedRef = useRef(true)
+  const previousLogCountRef = useRef(0)
+  const [unreadLogCount, setUnreadLogCount] = useState(0)
   const propertyDialogRef = useRef<HTMLElement | null>(null)
   const ownerHoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const turnSoundRef = useRef<HTMLAudioElement | null>(null)
+  const tradeSoundRef = useRef<HTMLAudioElement | null>(null)
+  const turnWarningSoundRef = useRef<HTMLAudioElement | null>(null)
+  const lastTurnSoundKeyRef = useRef<string | null>(null)
+  const lastTurnWarningSoundKeyRef = useRef<string | null>(null)
+  const lastTradeSoundKeyRef = useRef<string | null>(null)
+  const lastAuctionSoundKeyRef = useRef<string | null>(null)
+  const audioUnlockedRef = useRef(false)
+  const pendingSoundRef = useRef<HTMLAudioElement | null>(null)
+  const playSoundRef = useRef<(sound: HTMLAudioElement) => void>(() => undefined)
   const appliedOnlineRevisionRef = useRef(0)
   const applyingOnlineStateRef = useRef(false)
   const serverForcedActionRef = useRef(false)
+  const suspendOnlinePublishRef = useRef(false)
   const forcedOnlinePublishRef = useRef(false)
+  const movingPlayerIdRef = useRef<string | null>(null)
+  const movementDestinationRef = useRef<number | null>(null)
   const onlinePublishAuthorityRef = useRef(
     !localPlayerId || localPlayerId === initialGamePlayers[0]?.id,
   )
-  const handledTimeoutRef = useRef(0)
+  const handledTimeoutIdsRef = useRef(new Set<string>())
   const [turnClockNow, setTurnClockNow] = useState(0)
+  const [forcedPublishTick, setForcedPublishTick] = useState(0)
 
   const activePlayer = players[activePlayerIndex]
+  const movingPlayer = movingPlayerId ? players.find((player) => player.id === movingPlayerId) ?? null : null
   const canLocalPlayerAct = !localPlayerId || localPlayerId === activePlayer.id
   const canLocalPlayerPay = !localPlayerId || localPlayerId === pendingPayment?.payerId
   const canActNow = () => canLocalPlayerAct || serverForcedActionRef.current
@@ -458,9 +502,143 @@ function App({
     : 70
 
   useEffect(() => {
+    const turnSound = new Audio(turnSoundUrl)
+    const tradeSound = new Audio(tradeSoundUrl)
+    const turnWarningSound = new Audio(turnWarningSoundUrl)
+    turnSound.preload = 'auto'
+    tradeSound.preload = 'auto'
+    turnWarningSound.preload = 'auto'
+    turnSound.volume = 0.58
+    tradeSound.volume = 0.64
+    turnWarningSound.volume = 0.68
+    turnSoundRef.current = turnSound
+    tradeSoundRef.current = tradeSound
+    turnWarningSoundRef.current = turnWarningSound
+    playSoundRef.current = (sound) => {
+      if (!audioUnlockedRef.current) {
+        pendingSoundRef.current = sound
+        return
+      }
+      sound.currentTime = 0
+      void sound.play().catch(() => {
+        // Браузер может запретить звук, но это не должно ломать игру.
+      })
+    }
+
+    const unlockAudio = () => {
+      if (audioUnlockedRef.current) return
+      audioUnlockedRef.current = true
+      const pendingSound = pendingSoundRef.current
+      pendingSoundRef.current = null
+      if (pendingSound) {
+        pendingSound.currentTime = 0
+        void pendingSound.play().catch(() => undefined)
+        return
+      }
+      ;[turnSound, tradeSound, turnWarningSound].forEach((sound) => {
+        sound.muted = true
+        void sound.play()
+          .then(() => {
+            sound.pause()
+            sound.currentTime = 0
+            sound.muted = false
+          })
+          .catch(() => {
+            sound.muted = false
+          })
+      })
+    }
+    window.addEventListener('pointerdown', unlockAudio, { once: true })
+    window.addEventListener('keydown', unlockAudio, { once: true })
+
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio)
+      window.removeEventListener('keydown', unlockAudio)
+      turnSound.pause()
+      tradeSound.pause()
+      turnWarningSound.pause()
+      pendingSoundRef.current = null
+      playSoundRef.current = () => undefined
+      turnSoundRef.current = null
+      tradeSoundRef.current = null
+      turnWarningSoundRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const turnSoundKey = `${turnSequence}:${activePlayer.id}`
+    if (lastTurnSoundKeyRef.current === turnSoundKey) return
+    lastTurnSoundKeyRef.current = turnSoundKey
+    if (
+      winnerId || auction || tradeDraft || pendingPayment || pendingTileId !== null || casino ||
+      (localPlayerId && localPlayerId !== activePlayer.id)
+    ) return
+
+    const sound = turnSoundRef.current
+    if (!sound) return
+    playSoundRef.current(sound)
+  }, [activePlayer.id, auction, casino, localPlayerId, pendingPayment, pendingTileId, tradeDraft, turnSequence, winnerId])
+
+  useEffect(() => {
+    if (
+      secondsLeft <= 0 || secondsLeft > 15 || isRolling || winnerId || auction || tradeDraft ||
+      pendingPayment || pendingTileId !== null || casino ||
+      (localPlayerId && localPlayerId !== activePlayer.id)
+    ) return
+
+    const warningKey = `${turnSequence}:${activePlayer.id}`
+    if (lastTurnWarningSoundKeyRef.current === warningKey) return
+    lastTurnWarningSoundKeyRef.current = warningKey
+    const sound = turnWarningSoundRef.current
+    if (sound) playSoundRef.current(sound)
+  }, [activePlayer.id, auction, casino, isRolling, localPlayerId, pendingPayment, pendingTileId, secondsLeft, tradeDraft, turnSequence, winnerId])
+
+  useEffect(() => {
+    const tradeSoundKey = tradeDraft?.stage === 'review'
+      ? `${turnSequence}:${activePlayer.id}:${tradeDraft.targetPlayerId}:${tradeDraft.offeredMoney}:${tradeDraft.requestedMoney}:${tradeDraft.offeredTileIds.join(',')}:${tradeDraft.requestedTileIds.join(',')}`
+      : null
+    if (!tradeSoundKey) {
+      lastTradeSoundKeyRef.current = null
+      return
+    }
+    if (lastTradeSoundKeyRef.current === tradeSoundKey) return
+    lastTradeSoundKeyRef.current = tradeSoundKey
+    if (localPlayerId && localPlayerId !== tradeDraft?.targetPlayerId) return
+
+    const sound = tradeSoundRef.current
+    if (!sound) return
+    playSoundRef.current(sound)
+  }, [activePlayer.id, localPlayerId, tradeDraft, turnSequence])
+
+  useEffect(() => {
+    const auctionSoundKey = auction
+      ? `${turnSequence}:${auction.tileId}:${auction.activeBidderId}:${auction.currentBid}:${auction.highestBidderId ?? 'none'}:${auction.passedIds.join(',')}`
+      : null
+    if (!auctionSoundKey) {
+      lastAuctionSoundKeyRef.current = null
+      return
+    }
+    if (lastAuctionSoundKeyRef.current === auctionSoundKey) return
+    lastAuctionSoundKeyRef.current = auctionSoundKey
+    if (localPlayerId && localPlayerId !== auction?.activeBidderId) return
+
+    const sound = tradeSoundRef.current
+    if (!sound) return
+    playSoundRef.current(sound)
+  }, [auction, localPlayerId, turnSequence])
+
+  useEffect(() => {
     if (!turnDeadline) return
+    const syncClock = () => setTurnClockNow(Date.now())
+    syncClock()
     const timer = window.setInterval(() => setTurnClockNow(Date.now()), 250)
-    return () => window.clearInterval(timer)
+    window.addEventListener('focus', syncClock)
+    document.addEventListener('visibilitychange', syncClock)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', syncClock)
+      document.removeEventListener('visibilitychange', syncClock)
+    }
   }, [turnDeadline])
 
   useEffect(() => {
@@ -485,17 +663,30 @@ function App({
   const previewedPlayerId = hoveredOwnerId ?? selectedPropertyOwnerId
   const tradeTarget = tradeDraft ? players.find((player) => player.id === tradeDraft.targetPlayerId) ?? null : null
   const canLocalPlayerAnswerTrade = !localPlayerId || localPlayerId === tradeDraft?.targetPlayerId
-  const canLocalPlayerSeeTrade = !localPlayerId || (
-    tradeDraft?.stage === 'draft'
-      ? localPlayerId === activePlayer.id
-      : localPlayerId === activePlayer.id || localPlayerId === tradeDraft?.targetPlayerId
+  const canLocalPlayerEditTradeDraft = Boolean(
+    tradeDraft?.stage === 'draft' && (!localPlayerId || localPlayerId === activePlayer.id),
   )
+  const canLocalPlayerSeeTrade = Boolean(
+    tradeDraft && (
+      !localPlayerId || (
+        tradeDraft.stage === 'draft'
+          ? localPlayerId === activePlayer.id
+          : localPlayerId === tradeDraft.targetPlayerId
+      )
+    ),
+  )
+  const canLocalPlayerUsePropertyActions = canLocalPlayerAct && !tradeDraft && !auction && !casino
   const onlineDecisionPlayerId = tradeDraft?.stage === 'review'
     ? tradeDraft.targetPlayerId
     : auction?.activeBidderId
       ?? pendingPayment?.payerId
       ?? casino?.playerId
       ?? activePlayer.id
+  const decisionPlayer = players.find((player) => player.id === onlineDecisionPlayerId) ?? activePlayer
+  const canLocalPlayerUseTurnControls = !localPlayerId || (
+    localPlayerId === activePlayer.id && onlineDecisionPlayerId === activePlayer.id
+  )
+  const canLocalPlayerBidAtAuction = !localPlayerId || localPlayerId === auction?.activeBidderId
   const auctionTile = auction ? brandTiles.find((tile) => tile.id === auction.tileId) ?? null : null
   const auctionBidder = auction ? players.find((player) => player.id === auction.activeBidderId) ?? null : null
   const paymentPayer = pendingPayment
@@ -520,7 +711,19 @@ function App({
         ?? state.players[state.activePlayerIndex]?.id
     onlinePublishAuthorityRef.current = !localPlayerId || localPlayerId === incomingDecisionPlayerId
     appliedOnlineRevisionRef.current = onlineState.revision
-    setPlayers(state.players)
+    const incomingEliminatedIds = state.eliminatedPlayerIds ?? []
+    setPlayers((currentPlayers) => {
+      const movingId = movingPlayerIdRef.current
+      const movingPosition = currentPlayers.find((player) => player.id === movingId)?.position
+      return state.players.map((player) => {
+        const normalizedPlayer = incomingEliminatedIds.includes(player.id)
+          ? { ...player, money: 0, lastDelta: 0 }
+          : player
+        return player.id === movingId && movingPosition !== undefined
+          ? { ...normalizedPlayer, position: movingPosition }
+          : normalizedPlayer
+      })
+    })
     setActivePlayerIndex(state.activePlayerIndex)
     setOwners(state.owners)
     setPropertyLevels(state.propertyLevels)
@@ -546,7 +749,9 @@ function App({
     setUpgradedGroupsThisTurn(state.upgradedGroupsThisTurn)
     setPlayerEffects(state.playerEffects)
     setLapCounts(state.lapCounts)
-    setEliminatedPlayerIds(state.eliminatedPlayerIds ?? [])
+    setTradeRequestsThisTurn(state.tradeRequestsThisTurn ?? 0)
+    setMissedTurnCounts(state.missedTurnCounts ?? {})
+    setEliminatedPlayerIds(incomingEliminatedIds)
     setWinnerId(state.winnerId ?? null)
     window.requestAnimationFrame(() => {
       applyingOnlineStateRef.current = false
@@ -557,6 +762,7 @@ function App({
     if (
       !publishOnlineState ||
       applyingOnlineStateRef.current ||
+      suspendOnlinePublishRef.current ||
       (!onlinePublishAuthorityRef.current && !forcedOnlinePublishRef.current)
     ) return
     publishOnlineState({
@@ -582,6 +788,8 @@ function App({
       upgradedGroupsThisTurn,
       playerEffects,
       lapCounts,
+      tradeRequestsThisTurn,
+      missedTurnCounts,
       eliminatedPlayerIds,
       winnerId,
     })
@@ -589,10 +797,11 @@ function App({
     forcedOnlinePublishRef.current = false
   }, [
     activePlayerIndex, auction, casino, casinoJackpot, eliminatedPlayerIds, eventPaymentQueue, hasExtraRoll,
-    jailFailedAttempts, jailedPlayerIds, lapCounts, lastRoll, localPlayerId, logs,
+    jailFailedAttempts, jailedPlayerIds, lapCounts, lastRoll, localPlayerId, logs, missedTurnCounts,
     mortgageExpiryTurns, mortgagedPropertyIds, owners, pendingPayment,
     pendingTileId, playerEffects, players, propertyLevels, publishOnlineState, tradeDraft,
-    turnSequence, upgradedGroupsThisTurn, winnerId, onlineDecisionPlayerId,
+    tradeRequestsThisTurn, turnSequence, upgradedGroupsThisTurn, winnerId, onlineDecisionPlayerId,
+    forcedPublishTick,
   ])
 
   const playersByTile = useMemo(() => {
@@ -602,6 +811,15 @@ function App({
       return acc
     }, {})
   }, [eliminatedPlayerIds, players])
+
+  const subscriptionCountsByOwner = useMemo(() => subscriptionTiles.reduce<Record<string, number>>(
+    (counts, tile) => {
+      const ownerId = owners[tile.id]
+      if (ownerId) counts[ownerId] = (counts[ownerId] ?? 0) + 1
+      return counts
+    },
+    {},
+  ), [owners])
 
   const completedGroups = useMemo(() => {
     const result: Record<string, Player> = {}
@@ -668,11 +886,24 @@ function App({
 
   useEffect(() => {
     const logList = logListRef.current
+    const addedLogs = Math.max(0, logs.length - previousLogCountRef.current)
+    previousLogCountRef.current = logs.length
 
     if (logList && keepLogPinnedRef.current) {
       logList.scrollTo({ top: logList.scrollHeight, behavior: logs.length > 1 ? 'smooth' : 'auto' })
+      setUnreadLogCount(0)
+    } else if (addedLogs > 0) {
+      setUnreadLogCount((count) => count + addedLogs)
     }
   }, [logs])
+
+  const scrollToLatestLogs = () => {
+    const logList = logListRef.current
+    if (!logList) return
+    keepLogPinnedRef.current = true
+    setUnreadLogCount(0)
+    logList.scrollTo({ top: logList.scrollHeight, behavior: 'smooth' })
+  }
 
   useEffect(() => {
     return () => {
@@ -726,6 +957,7 @@ function App({
       return next
     })
     setTurnSequence(nextTurnSequence)
+    setTradeRequestsThisTurn(0)
     setUpgradedGroupsThisTurn([])
     setHasExtraRoll(false)
 
@@ -774,7 +1006,10 @@ function App({
   }
 
   const applyMoneyDeltas = (deltas: Record<string, number>) => {
-    const cancelledChallenges = Object.entries(deltas)
+    const activeDeltas = Object.fromEntries(
+      Object.entries(deltas).filter(([playerId]) => !eliminatedPlayerIds.includes(playerId)),
+    )
+    const cancelledChallenges = Object.entries(activeDeltas)
       .filter(([playerId, delta]) => delta < 0 && playerEffects[playerId]?.bookChallenge)
       .map(([playerId]) => playerId)
 
@@ -801,7 +1036,12 @@ function App({
 
     setPlayers((items) =>
       items.map((item) => {
-        const delta = deltas[item.id]
+        if (eliminatedPlayerIds.includes(item.id)) {
+          return item.money === 0 && (item.lastDelta ?? 0) === 0
+            ? item
+            : { ...item, money: 0, lastDelta: 0 }
+        }
+        const delta = activeDeltas[item.id]
 
         if (delta === undefined) return item
 
@@ -827,7 +1067,10 @@ function App({
   }
 
   const startEventPaymentSequence = (payments: EventPayment[]) => {
-    const validPayments = payments.filter((payment) => payment.amount > 0)
+    const validPayments = payments.filter((payment) =>
+      payment.amount > 0 &&
+      !eliminatedPlayerIds.includes(payment.payerId) &&
+      (!payment.recipientId || !eliminatedPlayerIds.includes(payment.recipientId)))
     const [firstPayment, ...remainingPayments] = validPayments
 
     if (!firstPayment) {
@@ -854,6 +1097,8 @@ function App({
 
     const surrenderedTileIds = brandTiles.filter((tile) => owners[tile.id] === playerId).map((tile) => tile.id)
     const remainingPlayers = players.filter((item) => item.id !== playerId && !eliminatedPlayerIds.includes(item.id))
+    setPlayers((items) => items.map((item) =>
+      item.id === playerId ? { ...item, money: 0, lastDelta: 0 } : item))
     setEliminatedPlayerIds((ids) => [...new Set([...ids, playerId])])
     setJailedPlayerIds((ids) => ids.filter((id) => id !== playerId))
     setJailFailedAttempts((items) => {
@@ -1184,14 +1429,20 @@ function App({
   }
 
   const openPlayerInteraction = (playerId: string) => {
+    const isOwnSurrenderAction = playerId === activePlayer.id && (!localPlayerId || localPlayerId === playerId)
+    const isTradeAction = playerId !== activePlayer.id && canLocalPlayerAct
+    if (!isOwnSurrenderAction && !isTradeAction) {
+      setInteractionPlayerId(null)
+      return
+    }
     stopOwnerPreview()
     setSelectedPropertyId(null)
-    setTradeDraft(null)
     setInteractionPlayerId((currentId) => (currentId === playerId ? null : playerId))
   }
 
   const beginTrade = (targetPlayerId: string) => {
-    if (!canActNow()) return
+    if (!canActNow() || tradeRequestsThisTurn >= maxTradeRequestsPerTurn) return
+    setInteractionPlayerId(null)
     setTradeDraft({
       targetPlayerId,
       offeredMoney: 0,
@@ -1217,7 +1468,7 @@ function App({
   }
 
   const submitTrade = () => {
-    if (!canActNow() || !tradeDraft) return
+    if (!canActNow() || !tradeDraft || tradeRequestsThisTurn >= maxTradeRequestsPerTurn) return
     const hasOffer =
       tradeDraft.offeredMoney > 0 ||
       tradeDraft.requestedMoney > 0 ||
@@ -1234,6 +1485,7 @@ function App({
       return
     }
 
+    setTradeRequestsThisTurn((count) => count + 1)
     setTradeDraft({ ...tradeDraft, stage: 'review' })
   }
 
@@ -1416,7 +1668,7 @@ function App({
       return
     }
 
-    if ((propertyLevels[selectedProperty.id] ?? 0) > 0) return
+    if (!canMortgageProperty(selectedProperty, propertyLevels)) return
 
     const mortgageValue = getMortgageValue(selectedProperty)
     setMortgagedPropertyIds((ids) => [...ids, selectedProperty.id])
@@ -1442,51 +1694,66 @@ function App({
     destinationPosition: number,
     speedMultiplier = 1,
   ) => {
+    movingPlayerIdRef.current = playerId
+    movementDestinationRef.current = destinationPosition
     setMovingPlayerId(playerId)
-    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+    try {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
 
-    const board = boardRef.current
-    const player = players.find((item) => item.id === playerId)
-    const startTile = board?.querySelector<HTMLElement>(`[data-tile-id="${startPosition}"]`)
-    const destinationTile = board?.querySelector<HTMLElement>(`[data-tile-id="${destinationPosition}"]`)
+      const board = boardRef.current
+      const player = players.find((item) => item.id === playerId)
+      const startTile = board?.querySelector<HTMLElement>(`[data-tile-id="${startPosition}"]`)
+      const destinationTile = board?.querySelector<HTMLElement>(`[data-tile-id="${destinationPosition}"]`)
 
-    if (board && player && startTile && destinationTile) {
-      const start = {
-        x: startTile.offsetLeft + startTile.offsetWidth / 2,
-        y: startTile.offsetTop + startTile.offsetHeight / 2,
+      if (board && player && startTile && destinationTile) {
+        const start = {
+          x: startTile.offsetLeft + startTile.offsetWidth / 2,
+          y: startTile.offsetTop + startTile.offsetHeight / 2,
+        }
+        const destination = {
+          x: destinationTile.offsetLeft + destinationTile.offsetWidth / 2,
+          y: destinationTile.offsetTop + destinationTile.offsetHeight / 2,
+        }
+        const travelDistance = distanceBetween(start, destination)
+        let flyingToken = movingTokenRef.current
+        for (let frame = 0; !flyingToken && frame < 10; frame += 1) {
+          await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+          flyingToken = movingTokenRef.current
+        }
+        if (!flyingToken) return
+
+        const animation = flyingToken.animate(
+          [
+            { transform: `translate(${start.x - movementTokenRadius}px, ${start.y - movementTokenRadius}px) scale(1.08)` },
+            { transform: `translate(${destination.x - movementTokenRadius}px, ${destination.y - movementTokenRadius}px) scale(1.08)` },
+          ],
+          {
+            duration: Math.max(400, travelDistance / (movementPixelsPerMillisecond * speedMultiplier)),
+            easing: 'linear',
+            fill: 'forwards',
+          },
+        )
+
+        try {
+          await animation.finished
+        } catch {
+          // Resize/unmount can cancel a Web Animation; the game still finishes the move.
+        } finally {
+          animation.cancel()
+        }
       }
-      const destination = {
-        x: destinationTile.offsetLeft + destinationTile.offsetWidth / 2,
-        y: destinationTile.offsetTop + destinationTile.offsetHeight / 2,
-      }
-      const travelDistance = distanceBetween(start, destination)
-      const flyingToken = document.createElement('span')
-      flyingToken.className = 'token moving-token'
-      flyingToken.textContent = player.avatar
-      flyingToken.title = player.name
-      flyingToken.style.setProperty('--player-color', player.color)
-      board.append(flyingToken)
-
-      const animation = flyingToken.animate(
-        [
-          { transform: `translate(${start.x - 14}px, ${start.y - 14}px) scale(1.08)` },
-          { transform: `translate(${destination.x - 14}px, ${destination.y - 14}px) scale(1.08)` },
-        ],
-        {
-          duration: Math.max(400, travelDistance / (movementPixelsPerMillisecond * speedMultiplier)),
-          easing: 'linear',
-          fill: 'forwards',
-        },
-      )
-
-      try {
-        await animation.finished
-      } finally {
-        flyingToken.remove()
+    } finally {
+      if (movingPlayerIdRef.current === playerId) {
+        const destination = movementDestinationRef.current
+        if (destination !== null) {
+          setPlayers((items) => items.map((item) =>
+            item.id === playerId ? { ...item, position: destination } : item))
+        }
+        movingPlayerIdRef.current = null
+        movementDestinationRef.current = null
+        setMovingPlayerId(null)
       }
     }
-
-    setMovingPlayerId(null)
   }
 
   const animatePlayerToJail = (playerId: string, startPosition: number) =>
@@ -1597,7 +1864,8 @@ function App({
   }
 
   const resolveChanceEvent = async (player: Player, tile: Tile, extraRoll: boolean, diceTotal: number) => {
-    const otherPlayers = players.filter((item) => item.id !== player.id)
+    const otherPlayers = players.filter((item) =>
+      item.id !== player.id && !eliminatedPlayerIds.includes(item.id))
     const events = [
       'teleport', 'skip', 'reverse', 'tea', 'compliments', 'furniture',
       'invest-win', 'invest-loss', 'book-money', 'shopping', 'business',
@@ -1634,7 +1902,10 @@ function App({
       })
       await animatePlayerDirectly(player.id, tile.id, destination.id, 1.15)
       setPlayers((items) => items.map((item) => item.id === player.id ? { ...item, position: destination.id } : item))
-      const teleportedPlayer = { ...player, position: destination.id }
+      const teleportedPlayer = {
+        ...player,
+        position: destination.id,
+      }
       if (destination.type === 'brand') {
         await resolveLanding(teleportedPlayer, destination, extraRoll, diceTotal, true)
       } else {
@@ -1914,95 +2185,112 @@ function App({
     startPosition: number,
     steps: number,
     direction: 1 | -1 = 1,
-    updatePosition = true,
   ) => {
-    setMovingPlayerId(playerId)
-    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
-
-    const board = boardRef.current
-    const player = players.find((item) => item.id === playerId)
-    const route = Array.from(
-      { length: steps + 1 },
-      (_, index) => (startPosition + index * direction + tiles.length) % tiles.length,
-    )
-    const routePoints = route.flatMap((tileId) => {
-      const tile = board?.querySelector<HTMLElement>(`[data-tile-id="${tileId}"]`)
-      return tile ? [{ x: tile.offsetLeft + tile.offsetWidth / 2, y: tile.offsetTop + tile.offsetHeight / 2 }] : []
-    })
-
-    if (board && player && routePoints.length === route.length && routePoints.length > 1) {
-      const points = smoothMovementPath(routePoints)
-      const distances = points.slice(1).map((point, index) => distanceBetween(points[index], point))
-      const totalDistance = distances.reduce((total, distance) => total + distance, 0)
-      let travelledDistance = 0
-      const offsets = [0, ...distances.map((distance) => {
-        travelledDistance += distance
-        return travelledDistance / totalDistance
-      })]
-      const flyingToken = document.createElement('span')
-      flyingToken.className = 'token moving-token'
-      flyingToken.textContent = player.avatar
-      flyingToken.title = player.name
-      flyingToken.style.setProperty('--player-color', player.color)
-      board.append(flyingToken)
-
-      const animation = flyingToken.animate(
-        points.map((point, index) => ({
-          transform: `translate(${point.x - 14}px, ${point.y - 14}px) scale(1.08)`,
-          offset: offsets[index],
-        })),
-        {
-          duration: Math.max(500, totalDistance / movementPixelsPerMillisecond),
-          easing: 'linear',
-          fill: 'forwards',
-        },
-      )
-
-      try {
-        await animation.finished
-      } finally {
-        flyingToken.remove()
-      }
-    } else {
-      await new Promise<void>((resolve) =>
-        window.setTimeout(resolve, Math.max(500, steps * fallbackMovementDurationPerTile)),
-      )
-    }
-
     const finalPosition = (startPosition + steps * direction + tiles.length) % tiles.length
-    if (updatePosition) {
-      setPlayers((items) =>
-        items.map((item) => (item.id === playerId ? { ...item, position: finalPosition } : item)),
+    movingPlayerIdRef.current = playerId
+    movementDestinationRef.current = finalPosition
+    setMovingPlayerId(playerId)
+    try {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+
+      const board = boardRef.current
+      const player = players.find((item) => item.id === playerId)
+      const route = Array.from(
+        { length: steps + 1 },
+        (_, index) => (startPosition + index * direction + tiles.length) % tiles.length,
       )
+      const routePoints = route.flatMap((tileId) => {
+        const tile = board?.querySelector<HTMLElement>(`[data-tile-id="${tileId}"]`)
+        return tile ? [{ x: tile.offsetLeft + tile.offsetWidth / 2, y: tile.offsetTop + tile.offsetHeight / 2 }] : []
+      })
+
+      if (board && player && routePoints.length === route.length && routePoints.length > 1) {
+        const points = smoothMovementPath(routePoints)
+        const distances = points.slice(1).map((point, index) => distanceBetween(points[index], point))
+        const totalDistance = distances.reduce((total, distance) => total + distance, 0)
+        let travelledDistance = 0
+        const offsets = [0, ...distances.map((distance) => {
+          travelledDistance += distance
+          return travelledDistance / totalDistance
+        })]
+        let flyingToken = movingTokenRef.current
+        for (let frame = 0; !flyingToken && frame < 10; frame += 1) {
+          await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+          flyingToken = movingTokenRef.current
+        }
+        if (!flyingToken) return
+
+        const animation = flyingToken.animate(
+          points.map((point, index) => ({
+            transform: `translate(${point.x - movementTokenRadius}px, ${point.y - movementTokenRadius}px) scale(1.08)`,
+            offset: offsets[index],
+          })),
+          {
+            duration: Math.max(500, totalDistance / movementPixelsPerMillisecond),
+            easing: 'linear',
+            fill: 'forwards',
+          },
+        )
+
+        try {
+          await animation.finished
+        } catch {
+          // Resize/unmount can cancel a Web Animation; the game still finishes the move.
+        } finally {
+          animation.cancel()
+        }
+      } else {
+        await new Promise<void>((resolve) =>
+          window.setTimeout(resolve, Math.max(500, steps * fallbackMovementDurationPerTile)),
+        )
+      }
+
+    } finally {
+      if (movingPlayerIdRef.current === playerId) {
+        const destination = movementDestinationRef.current
+        if (destination !== null) {
+          setPlayers((items) => items.map((item) =>
+            item.id === playerId ? { ...item, position: destination } : item))
+        }
+        movingPlayerIdRef.current = null
+        movementDestinationRef.current = null
+        setMovingPlayerId(null)
+      }
     }
-    setMovingPlayerId(null)
   }
 
   useEffect(() => {
-    if (!onlineGameEvent || onlineGameEvent.senderId === localPlayerId) return
+    if (!onlineGameEvent) return
     const event = onlineGameEvent.event
-    const timer = window.setTimeout(() => {
-      if (event.kind === 'movement') {
-        void animatePlayerMovement(event.playerId, event.startPosition, event.steps, event.direction, false)
-      } else {
-        void animatePlayerDirectly(
-          event.playerId,
-          event.startPosition,
-          event.destinationPosition,
-          event.speedMultiplier,
-        )
+    const eventId = onlineGameEvent.nonce
+    const playEvent = async () => {
+      try {
+        if (event.kind === 'movement') {
+          await animatePlayerMovement(event.playerId, event.startPosition, event.steps, event.direction)
+        } else {
+          await animatePlayerDirectly(
+            event.playerId,
+            event.startPosition,
+            event.destinationPosition,
+            event.speedMultiplier,
+          )
+        }
+      } finally {
+        acknowledgeOnlineGameEvent?.(eventId)
       }
-    }, 0)
-    return () => window.clearTimeout(timer)
-    // A new event nonce is the sole animation trigger.
+    }
+    void playEvent()
+    // The queue advances only after this animation finishes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onlineGameEvent?.nonce])
 
   const rollDice = async () => {
     if (!canActNow() || isRolling || pendingTile || pendingPayment || casino || auction || tradeDraft) return
+    if (!serverForcedActionRef.current && turnDeadline && turnClockNow >= turnDeadline - 1000) return
 
     setSelectedPropertyId(null)
     setIsRolling(true)
+    if (!serverForcedActionRef.current) beginOnlineTurnAction?.()
     const roll = await rollComplexDice()
     setLastRoll(roll)
 
@@ -2064,6 +2352,7 @@ function App({
       ])
       sendOnlineGameEvent?.({ kind: 'movement', playerId: player.id, startPosition: 10, steps: roll.total, direction })
       await animatePlayerMovement(player.id, 10, roll.total, direction)
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 1000))
       setLogs((items) => [
         ...items,
         createLog(`${player.name} проходит ${roll.total} клеток${direction === -1 ? ' назад' : ''} и попадает на ${landedTile.name}`, player.id, 'move'),
@@ -2078,7 +2367,8 @@ function App({
     const nextPosition = (previousPosition + roll.total * direction + tiles.length) % tiles.length
     const passedStart = direction === 1 && previousPosition + roll.total >= tiles.length
     const completedLaps = lapCounts[player.id] ?? 0
-    const regularStartBonus = passedStart && completedLaps < 100 ? startBonus : 0
+    const completedLapNumber = completedLaps + 1
+    const regularStartBonus = passedStart ? startBonusForLap(completedLapNumber) : 0
     const bookBonus = passedStart && playerEffects[player.id]?.bookChallenge ? 500 : 0
     const totalStartBonus = regularStartBonus + bookBonus
     const landedTile = tiles[nextPosition]
@@ -2122,6 +2412,7 @@ function App({
       direction,
     })
     await animatePlayerMovement(player.id, previousPosition, roll.total, direction)
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 1000))
     setPlayers((items) =>
       items.map((item) =>
         item.id === player.id
@@ -2137,9 +2428,9 @@ function App({
       ...items,
       ...(passedStart
         ? [createLog(
-            regularStartBonus > 0
-              ? `${player.name} проходит старт и получает ${money(regularStartBonus)}${bookBonus ? ` и книжный бонус ${money(bookBonus)}` : ''}`
-              : `${player.name} проходит старт после 100 оплаченных кругов без награды${bookBonus ? `, но получает книжный бонус ${money(bookBonus)}` : ''}`,
+              regularStartBonus > 0
+                ? `${player.name} проходит старт и получает ${money(regularStartBonus)}${bookBonus ? ` и книжный бонус ${money(bookBonus)}` : ''}`
+                : `${player.name} проходит старт после 40 оплаченных кругов без награды${bookBonus ? `, но получает книжный бонус ${money(bookBonus)}` : ''}`,
             player.id,
             'rent',
             totalStartBonus || undefined,
@@ -2180,7 +2471,10 @@ function App({
     if (!canActNow() || !pendingTile) return
     const startingPrice = pendingTile.price ?? 0
     const participantIds = players
-      .filter((player) => player.id !== activePlayer.id && player.money >= startingPrice + auctionIncrement)
+      .filter((player) =>
+        player.id !== activePlayer.id &&
+        !eliminatedPlayerIds.includes(player.id) &&
+        player.money >= startingPrice + auctionIncrement)
       .map((player) => player.id)
 
     if (participantIds.length === 0) {
@@ -2241,7 +2535,7 @@ function App({
     }
     for (const tile of ownedTiles) {
       if (raised >= required) break
-      if ((nextLevels[tile.id] ?? 0) > 0 || nextMortgagedIds.includes(tile.id)) continue
+      if (!canMortgageProperty(tile, nextLevels) || nextMortgagedIds.includes(tile.id)) continue
       nextMortgagedIds.push(tile.id)
       nextExpiry[tile.id] = turnSequence + 15
       raised += getMortgageValue(tile)
@@ -2304,7 +2598,7 @@ function App({
     }
     for (const tile of ownedTiles) {
       if (raised >= required) break
-      if ((nextLevels[tile.id] ?? 0) > 0 || nextMortgagedIds.includes(tile.id)) continue
+      if (!canMortgageProperty(tile, nextLevels) || nextMortgagedIds.includes(tile.id)) continue
       nextMortgagedIds.push(tile.id)
       nextExpiry[tile.id] = turnSequence + 15
       raised += getMortgageValue(tile)
@@ -2327,26 +2621,50 @@ function App({
   }
 
   useEffect(() => {
-    if (!turnTimeoutSignal || turnTimeoutSignal.nonce <= handledTimeoutRef.current) return
-    handledTimeoutRef.current = turnTimeoutSignal.nonce
+    if (!turnTimeoutSignal || handledTimeoutIdsRef.current.has(turnTimeoutSignal.timeoutId)) return
+    handledTimeoutIdsRef.current.add(turnTimeoutSignal.timeoutId)
+    if (handledTimeoutIdsRef.current.size > 100) {
+      const oldestTimeoutId = handledTimeoutIdsRef.current.values().next().value
+      if (oldestTimeoutId) handledTimeoutIdsRef.current.delete(oldestTimeoutId)
+    }
     const timer = window.setTimeout(() => {
-      serverForcedActionRef.current = true
-      forcedOnlinePublishRef.current = true
-      if (pendingPayment) autoResolveTimedPayment()
-      else if (pendingTile) skipPurchase()
-      else if (auction) passAuction()
-      else if (casino) declineCasino()
-      else if (tradeDraft) closeSharedTrade()
-      else if (isActivePlayerJailed && isForcedJailRelease) {
-        autoReleaseFromJail()
-      } else {
-        setLogs((items) => [
-          ...items,
-          createLog(`${activePlayer.name} не успевает сделать ход и пропускает его`, activePlayer.id, 'system'),
-        ])
-        nextTurn()
+      const handleTimeout = async () => {
+        serverForcedActionRef.current = true
+        suspendOnlinePublishRef.current = true
+        forcedOnlinePublishRef.current = true
+        try {
+          const countsAsMissedTurn = !auction && !tradeDraft && onlineDecisionPlayerId === activePlayer.id
+          const nextMissedTurns = (missedTurnCounts[activePlayer.id] ?? 0) + 1
+          if (countsAsMissedTurn) {
+            setMissedTurnCounts((items) => ({ ...items, [activePlayer.id]: nextMissedTurns }))
+          }
+          if (countsAsMissedTurn && nextMissedTurns >= 3) {
+            setLogs((items) => [
+              ...items,
+              createLog(`${activePlayer.name} пропускает третий ход и выбывает`, activePlayer.id, 'bankruptcy'),
+            ])
+            surrenderPlayer(activePlayer.id)
+          } else if (pendingPayment) autoResolveTimedPayment()
+          else if (pendingTile) skipPurchase()
+          else if (auction) passAuction()
+          else if (casino) declineCasino()
+          else if (tradeDraft) closeSharedTrade()
+          else if (isActivePlayerJailed && isForcedJailRelease) {
+            autoReleaseFromJail()
+          } else {
+            setLogs((items) => [
+              ...items,
+              createLog(`${activePlayer.name} не успевает бросить кубики — выполняется автоматический бросок`, activePlayer.id, 'system'),
+            ])
+            await rollDice()
+          }
+        } finally {
+          serverForcedActionRef.current = false
+          suspendOnlinePublishRef.current = false
+          setForcedPublishTick((tick) => tick + 1)
+        }
       }
-      serverForcedActionRef.current = false
+      void handleTimeout()
     }, 0)
     return () => window.clearTimeout(timer)
     // The server signal is the sole trigger; gameplay values are intentionally read from this render.
@@ -2357,7 +2675,7 @@ function App({
     const text = message.trim().slice(0, 256)
     if (!text) return
     const localPlayer = localPlayerId ? players.find((player) => player.id === localPlayerId) : activePlayer
-    if (!localPlayer || eliminatedPlayerIds.includes(localPlayer.id)) return
+    if (!localPlayer) return
     if (sendOnlineChat) sendOnlineChat(text)
     else setLogs((items) => [...items, createLog(`${localPlayer.name}: ${text}`, localPlayer.id, 'chat')])
     setMessage('')
@@ -2381,8 +2699,14 @@ function App({
           const isEliminated = eliminatedPlayerIds.includes(player.id)
           const isDisconnected = disconnectedPlayerIds.includes(player.id)
           const delta = player.lastDelta ?? 0
+          const missedTurns = missedTurnCounts[player.id] ?? 0
 
-          const isInteractionOpen = interactionPlayerId === player.id && !tradeDraft
+          const canOpenSurrender = player.id === activePlayer.id && (!localPlayerId || localPlayerId === player.id)
+          const canOpenTrade = player.id !== activePlayer.id && canLocalPlayerAct && tradeRequestsThisTurn < maxTradeRequestsPerTurn
+          const canInteractWithPlayer = !isEliminated && (canOpenSurrender || canOpenTrade)
+          const isInteractionOpen = interactionPlayerId === player.id &&
+            !canLocalPlayerSeeTrade &&
+            canInteractWithPlayer
 
           return (
             <div
@@ -2394,8 +2718,8 @@ function App({
               <article
                 className={`player-card ${isActive && !isEliminated ? 'active' : ''} ${isEliminated ? 'eliminated' : ''} ${isDisconnected ? 'disconnected' : ''} ${previewedPlayerId === player.id ? 'previewing' : ''}`}
                 style={{ '--player-color': player.color } as CSSProperties}
-                role="button"
-                tabIndex={0}
+                role={canInteractWithPlayer ? 'button' : undefined}
+                tabIndex={canInteractWithPlayer ? 0 : undefined}
                 aria-expanded={isInteractionOpen}
                 onFocus={() => startOwnerPreview(player.id)}
                 onBlur={stopOwnerPreview}
@@ -2407,9 +2731,14 @@ function App({
                   }
                 }}
               >
+                <span className="player-laps" title="Пройдено кругов">Кругов: {lapCounts[player.id] ?? 0}</span>
                 <div className="avatar-wrap">
                   <div className="avatar">{player.avatar}</div>
-                  <span className="level-dot">{isEliminated ? '☠' : isDecisionPlayer ? secondsLeft : 70}</span>
+                  {isEliminated ? (
+                    <span className="level-dot">☠</span>
+                  ) : isDecisionPlayer && !(isRolling && player.id === activePlayer.id) ? (
+                    <span className="level-dot">{secondsLeft}</span>
+                  ) : null}
                 </div>
                 <div className="player-info">
                   <strong>{player.name}</strong>
@@ -2421,6 +2750,12 @@ function App({
                   <span className={`player-delta ${delta > 0 ? 'positive' : ''} ${delta < 0 ? 'negative' : ''}`}>
                     {deltaMoney(delta)}
                   </span>
+                  {missedTurns > 0 && !isEliminated ? (
+                    <span className="missed-turns">Пропуски: {missedTurns}/3</span>
+                  ) : null}
+                  {isActive && canLocalPlayerAct ? (
+                    <span className="trade-request-count">Обмены: {tradeRequestsThisTurn}/{maxTradeRequestsPerTurn}</span>
+                  ) : null}
                   {playerEffects[player.id] && Object.values(playerEffects[player.id]).some(Boolean) ? (
                     <span className="player-effects" aria-label="Активные эффекты">
                       {playerEffects[player.id]?.nextRentAdjustment ? <i>Аренда {deltaMoney(playerEffects[player.id].nextRentAdjustment)}</i> : null}
@@ -2441,7 +2776,7 @@ function App({
                   aria-label={`Действия с игроком ${player.name}`}
                   style={{ '--player-color': player.color } as CSSProperties}
                 >
-                  {player.id === activePlayer.id ? (
+                  {canOpenSurrender ? (
                     <button
                       type="button"
                       className="interaction-menu-button surrender-menu-button"
@@ -2451,7 +2786,7 @@ function App({
                       <span aria-hidden="true">×</span>
                       Сдаться
                     </button>
-                  ) : (
+                  ) : canOpenTrade ? (
                     <button
                       type="button"
                       className="interaction-menu-button"
@@ -2460,7 +2795,7 @@ function App({
                       <span aria-hidden="true">↔</span>
                       Обмен
                     </button>
-                  )}
+                  ) : null}
                 </section>
               ) : null}
             </div>
@@ -2485,22 +2820,21 @@ function App({
                 : tilePlayers
             const propertyLevel = propertyLevels[tile.id] ?? 0
             const currentRent = getRentAtLevel(tile, propertyLevel)
-            const ownedSubscriptionCount = owner
-              ? subscriptionTiles.filter((item) => owners[item.id] === owner).length
-              : 0
+            const ownedSubscriptionCount = owner ? subscriptionCountsByOwner[owner] ?? 0 : 0
             const subscriptionMultiplier =
               subscriptionRentMultipliers[Math.min(ownedSubscriptionCount, 2) - 1] ?? 100
             const ownedFleetCount = owner ? fleetTiles.filter((item) => owners[item.id] === owner).length : 0
             const fleetRent = fleetRentLevels[Math.min(ownedFleetCount, 4) - 1] ?? fleetRentLevels[0]
             const isMortgaged = mortgagedPropertyIds.includes(tile.id)
             const isPendingPaymentTile = pendingPayment?.tileId === tile.id
+            const isActivePlayerTile = activePlayer.position === tile.id && movingPlayerId !== activePlayer.id
             const tradeHistoryColor = tradeHistoryPreview[tile.id]
             const isSelectedProperty = selectedPropertyId === tile.id || pendingTile?.id === tile.id
             const isGroupPreview = Boolean(tile.group && hoveredGroup === tile.group)
             const side = getTileSide(tile.id)
             const isCorner = side === 'corner'
             const isLabeledEvent = tile.type === 'chance' || tile.type === 'tax' || tile.type === 'diamond'
-            const tradeSelectionSide = tradeDraft
+            const tradeSelectionSide = canLocalPlayerEditTradeDraft && tradeDraft
               ? owner === activePlayer.id
                 ? 'offered'
                 : owner === tradeTarget?.id
@@ -2522,15 +2856,14 @@ function App({
               '--trade-history-color': tradeHistoryColor ?? 'transparent',
               '--selected-tile-color': getTileTone(tile),
               '--group-preview-color': tile.group ? groupColors[tile.group] : 'transparent',
+              '--active-player-color': activePlayer.color,
             } as CSSProperties
 
             const openTile = () => {
-              if (tile.type !== 'brand' || auction) return
+              if (tile.type !== 'brand') return
 
-              if (tradeDraft) {
-                if (tradeDraft.stage === 'draft' && tradeSelectionSide) {
-                  toggleTradeTile(tradeSelectionSide, tile.id)
-                }
+              if (canLocalPlayerEditTradeDraft && tradeSelectionSide) {
+                toggleTradeTile(tradeSelectionSide, tile.id)
                 return
               }
 
@@ -2540,7 +2873,7 @@ function App({
 
             return (
               <div
-                className={`tile ${tile.type} side-${side} ${isCorner ? 'corner' : ''} ${owner ? 'owned' : ''} ${isMortgaged ? 'mortgaged' : ''} ${isPendingPaymentTile ? 'payment-due' : ''} ${owner && hoveredOwnerId === owner ? 'owner-preview' : ''} ${tradeHistoryColor ? 'trade-history-preview' : ''} ${isSelectedProperty ? 'selected-property' : ''} ${isGroupPreview ? 'group-preview' : ''} ${tradeSelectionSide ? 'trade-selectable' : ''} ${isTradeSelected ? `trade-selected trade-${tradeSelectionSide}` : ''} image-${tile.imageMode ?? 'contain'}`}
+                className={`tile ${tile.type} side-${side} ${isCorner ? 'corner' : ''} ${owner ? 'owned' : ''} ${isMortgaged ? 'mortgaged' : ''} ${isPendingPaymentTile ? 'payment-due' : ''} ${isActivePlayerTile ? 'active-player-tile' : ''} ${owner && hoveredOwnerId === owner ? 'owner-preview' : ''} ${tradeHistoryColor ? 'trade-history-preview' : ''} ${isSelectedProperty ? 'selected-property' : ''} ${isGroupPreview ? 'group-preview' : ''} ${tradeSelectionSide ? 'trade-selectable' : ''} ${isTradeSelected ? `trade-selected trade-${tradeSelectionSide}` : ''} image-${tile.imageMode ?? 'contain'}`}
                 key={tile.id}
                 data-tile-id={tile.id}
                 style={style}
@@ -2585,17 +2918,21 @@ function App({
 
                 <div className="tile-content">
                   {tile.image ? (
-                    <img
-                      className="tile-art"
-                      src={tile.image}
-                      alt=""
-                      style={
-                        {
-                          '--art-rotation': `${tile.imageRotation ?? 0}deg`,
-                          '--art-scale': tile.imageScale ?? 1,
-                        } as CSSProperties
-                      }
-                    />
+                    <>
+                      <img
+                        className="tile-art"
+                        src={tile.image}
+                        alt=""
+                        onError={(event) => { event.currentTarget.hidden = true }}
+                        style={
+                          {
+                            '--art-rotation': `${tile.imageRotation ?? 0}deg`,
+                            '--art-scale': tile.imageScale ?? 1,
+                          } as CSSProperties
+                        }
+                      />
+                      <span className="tile-image-fallback">{tile.label || tile.name}</span>
+                    </>
                   ) : !isLabeledEvent ? (
                     <div className="tile-logo">{tile.label || tile.name}</div>
                   ) : null}
@@ -2629,7 +2966,7 @@ function App({
                 <div className="tokens">
                   {visibleTilePlayers.map((player) => (
                     <span
-                      className={`token ${jailedPlayerIds.includes(player.id) ? 'jailed' : ''} ${movingPlayerId === player.id ? 'moving' : ''}`}
+                      className={`token ${player.id === activePlayer.id ? 'active-token' : ''} ${hoveredOwnerId === player.id ? 'preview-token' : ''} ${jailedPlayerIds.includes(player.id) ? 'jailed' : ''} ${movingPlayerId === player.id ? 'moving' : ''}`}
                       key={player.id}
                       title={player.name}
                       style={{ '--player-color': player.color } as CSSProperties}
@@ -2642,7 +2979,7 @@ function App({
                   <div className="tokens jail-tokens">
                     {jailedTilePlayers.map((player) => (
                       <span
-                        className={`token jailed ${movingPlayerId === player.id ? 'moving' : ''}`}
+                        className={`token jailed ${player.id === activePlayer.id ? 'active-token' : ''} ${hoveredOwnerId === player.id ? 'preview-token' : ''} ${movingPlayerId === player.id ? 'moving' : ''}`}
                         key={player.id}
                         title={player.name}
                         style={{ '--player-color': player.color } as CSSProperties}
@@ -2655,6 +2992,18 @@ function App({
               </div>
             )
           })}
+
+          {movingPlayer ? (
+            <span
+              ref={movingTokenRef}
+              className="token moving-token"
+              title={movingPlayer.name}
+              style={{ '--player-color': movingPlayer.color } as CSSProperties}
+              aria-hidden="true"
+            >
+              {movingPlayer.avatar}
+            </span>
+          ) : null}
 
           <section className="center-panel">
           {pendingTile && canLocalPlayerAct ? (
@@ -2813,9 +3162,11 @@ function App({
 
           {auction && auctionTile && auctionBidder ? (
             <section className="game-dialog auction-dialog" aria-label="Аукцион">
-              <button type="button" className="dialog-close" onClick={() => passAuction()} disabled={Boolean(localPlayerId && localPlayerId !== auctionBidder.id)} aria-label="Выйти из торгов">
-                ×
-              </button>
+              {canLocalPlayerBidAtAuction ? (
+                <button type="button" className="dialog-close" onClick={() => passAuction()} aria-label="Выйти из торгов">
+                  ×
+                </button>
+              ) : null}
               <div className="dialog-heading">
                 {auctionTile.image ? (
                   <img
@@ -2845,7 +3196,8 @@ function App({
                   Ход: <b style={{ color: auctionBidder.color }}>{auctionBidder.name}</b>
                 </span>
               </div>
-              <div className="auction-controls">
+              {canLocalPlayerBidAtAuction ? (
+                <div className="auction-controls">
                 <input
                   type="text"
                   inputMode="numeric"
@@ -2866,17 +3218,19 @@ function App({
                   className="auction-button"
                   onClick={placeAuctionBid}
                   disabled={
-                    Boolean(localPlayerId && localPlayerId !== auctionBidder.id) ||
                     Number(auctionBid) < auctionIncrement ||
                     auction.currentBid + Number(auctionBid) > auctionBidder.money
                   }
                 >
                   Ставка {money(auction.currentBid + Math.max(0, Math.floor(Number(auctionBid) || 0)))}
                 </button>
-                <button type="button" className="quiet-button" onClick={passAuction} disabled={Boolean(localPlayerId && localPlayerId !== auctionBidder.id)}>
+                <button type="button" className="quiet-button" onClick={passAuction}>
                   Пас
                 </button>
-              </div>
+                </div>
+              ) : (
+                <p className="decision-waiting-message">Ожидаем решение игрока {auctionBidder.name}…</p>
+              )}
               <div className="auction-players">
                 {auction.participantIds.map((id) => {
                   const bidder = players.find((player) => player.id === id)
@@ -2937,6 +3291,12 @@ function App({
                   const selectedTiles = column.tileKey === 'offeredTileIds'
                     ? tradeDraft.offeredTileIds
                     : tradeDraft.requestedTileIds
+                  const selectedPropertyValue = selectedTiles.reduce((total, tileId) => {
+                    const tile = brandTiles.find((item) => item.id === tileId)
+                    if (!tile) return total
+                    return total + (tile.price ?? 0) + (propertyLevels[tile.id] ?? 0) * getUpgradeCost(tile)
+                  }, 0)
+                  const tradeSideTotal = tradeDraft[column.moneyKey] + selectedPropertyValue
 
                   return (
                     <div className="trade-column" key={column.player.id}>
@@ -3009,7 +3369,7 @@ function App({
                                         {Math.max(0, (mortgageExpiryTurns[tile.id] ?? turnSequence) - turnSequence)}
                                       </span>
                                     )
-                                    : money(tile.price ?? 0)}
+                                    : money((tile.price ?? 0) + (propertyLevels[tile.id] ?? 0) * getUpgradeCost(tile))}
                                 </b>
                               </button>
                             )
@@ -3018,14 +3378,23 @@ function App({
                           <p>Выберите поле на доске</p>
                         )}
                       </div>
+                      <div className="trade-total">
+                        <span>Общая стоимость</span>
+                        <b>{money(tradeSideTotal)}</b>
+                      </div>
                     </div>
                   )
                 })}
               </div>
               <footer className="trade-footer">
                 {tradeDraft.stage === 'draft' ? (
-                  <button type="button" className="purchase-button" onClick={submitTrade} disabled={!canLocalPlayerAct}>
-                    Предложить обмен
+                  <button
+                    type="button"
+                    className="purchase-button"
+                    onClick={submitTrade}
+                    disabled={!canLocalPlayerAct || tradeRequestsThisTurn >= maxTradeRequestsPerTurn}
+                  >
+                    Предложить обмен ({tradeRequestsThisTurn + 1}/{maxTradeRequestsPerTurn})
                   </button>
                 ) : (
                   <>
@@ -3051,7 +3420,7 @@ function App({
                 '--property-axis': `${getPropertyDialogAxis(selectedProperty.id)}%`,
               } as CSSProperties}
             >
-              <button type="button" className="dialog-close" onClick={closeDialogs} aria-label="Закрыть">
+              <button type="button" className="dialog-close" onClick={() => setSelectedPropertyId(null)} aria-label="Закрыть">
                 ×
               </button>
               <header className="property-heading">
@@ -3117,8 +3486,10 @@ function App({
                   </>
                 ) : null}
               </div>
-              {owners[selectedProperty.id] === activePlayer.id ||
-              (!owners[selectedProperty.id] && pendingTile?.id === selectedProperty.id) ? (
+              {canLocalPlayerUsePropertyActions && (
+                owners[selectedProperty.id] === activePlayer.id ||
+                (!owners[selectedProperty.id] && pendingTile?.id === selectedProperty.id)
+              ) ? (
                 <div
                   className={`property-actions ${
                     !owners[selectedProperty.id] || !isUpgradeableTile(selectedProperty)
@@ -3179,6 +3550,9 @@ function App({
                       disabled={
                         ((propertyLevels[selectedProperty.id] ?? 0) > 0 &&
                           !canSellPropertyStarEvenly(selectedProperty, propertyLevels)) ||
+                        ((propertyLevels[selectedProperty.id] ?? 0) === 0 &&
+                          !mortgagedPropertyIds.includes(selectedProperty.id) &&
+                          !canMortgageProperty(selectedProperty, propertyLevels)) ||
                         (mortgagedPropertyIds.includes(selectedProperty.id) &&
                           activePlayer.money < getRedemptionCost(selectedProperty))
                       }
@@ -3189,7 +3563,9 @@ function App({
                           : `Продать ★ за ${money(getStarSaleValue(selectedProperty))}`
                         : mortgagedPropertyIds.includes(selectedProperty.id)
                           ? `Выкупить за ${money(getRedemptionCost(selectedProperty))}`
-                          : `Заложить за ${money(getMortgageValue(selectedProperty))}`}
+                          : !canMortgageProperty(selectedProperty, propertyLevels)
+                            ? 'Сначала продайте звёзды всей монополии'
+                            : `Заложить за ${money(getMortgageValue(selectedProperty))}`}
                     </button>
                   ) : null}
                 </div>
@@ -3197,8 +3573,9 @@ function App({
             </section>
           ) : null}
 
-          <div
-            className={`turn-card ${isActivePlayerJailed ? 'jailed-turn-card' : ''} ${
+          {canLocalPlayerUseTurnControls ? (
+            <div
+              className={`turn-card ${isActivePlayerJailed ? 'jailed-turn-card' : ''} ${
               (pendingTile && canLocalPlayerAct) ||
               (pendingPayment && canLocalPlayerPay) ||
               (casino && (!localPlayerId || localPlayerId === casino.playerId))
@@ -3255,6 +3632,7 @@ function App({
                     disabled={
                       isRolling ||
                       !canLocalPlayerAct ||
+                      Boolean(turnDeadline && secondsLeft <= 1) ||
                       Boolean(pendingTile) ||
                       Boolean(pendingPayment) ||
                       Boolean(casino) ||
@@ -3267,16 +3645,29 @@ function App({
                 ) : null}
               </div>
             </div>
-          </div>
-
+            </div>
+          ) : (
             <div
-              className="log-list"
-              ref={logListRef}
-              onScroll={(event) => {
-                const element = event.currentTarget
-                keepLogPinnedRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40
-              }}
+              className="turn-card spectator-turn-card"
+              style={{ '--player-color': decisionPlayer.color } as CSSProperties}
+              aria-live="polite"
             >
+              <small>Сейчас ходит</small>
+              <strong>{decisionPlayer.name}</strong>
+            </div>
+          )}
+
+            <div className="log-panel">
+              <div
+                className="log-list"
+                ref={logListRef}
+                onScroll={(event) => {
+                  const element = event.currentTarget
+                  const isPinned = element.scrollHeight - element.scrollTop - element.clientHeight < 40
+                  keepLogPinnedRef.current = isPinned
+                  if (isPinned) setUnreadLogCount(0)
+                }}
+              >
               {logs.map((entry) => {
                 const player = players.find((item) => item.id === entry.playerId)
                 const showTradeHistoryPreview = () => {
@@ -3369,6 +3760,12 @@ function App({
                   </article>
                 )
               })}
+              </div>
+              {unreadLogCount > 0 ? (
+                <button type="button" className="new-log-indicator" onClick={scrollToLatestLogs}>
+                  Новых событий: {unreadLogCount} ↓
+                </button>
+              ) : null}
             </div>
 
             {lastRoll ? (

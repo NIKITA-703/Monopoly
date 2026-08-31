@@ -8,6 +8,7 @@
     "dev:server": "node --env-file-if-exists=.env --watch server/index.mjs",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "reset:session": "node --env-file-if-exists=.env server/reset-session.mjs",
     "test:online": "node test/online.integration.mjs",
     "preview": "vite preview",
     "start": "node --env-file-if-exists=.env server/index.mjs"

@@ -106,6 +106,20 @@
   padding: 28px;
 }
 
+.lobby-connection-warning {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 11px;
+  border: 1px solid rgba(255, 181, 94, 0.3);
+  border-radius: 999px;
+  color: #ffca86;
+  background: rgba(45, 30, 13, 0.92);
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .lobby-header {
   display: flex;
   align-items: center;
@@ -191,10 +205,28 @@
 }
 
 .lobby-controls label { display: grid; gap: 7px; color: #aebdcd; font-size: 13px; }
+.nickname-error { color: #ff6978; font-size: 12px; font-weight: 700; }
 .lobby-actions { display: flex; gap: 10px; }
 .lobby-actions button { min-width: 160px; padding: 0 18px; }
 .lobby-actions .leave-seat-button { color: #c1cedc; background: rgba(255, 255, 255, 0.08); }
 .lobby-actions .ready-button.active { background: #267e6c; box-shadow: inset 0 0 0 2px #59e0c4; }
+
+.lobby-idle-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 181, 94, 0.48);
+  border-radius: 8px;
+  background: rgba(255, 181, 94, 0.1);
+}
+
+.lobby-idle-warning div { display: grid; gap: 3px; }
+.lobby-idle-warning strong { color: #ffca88; }
+.lobby-idle-warning span { color: #b8c4d0; font-size: 13px; }
+.lobby-idle-warning button { flex: 0 0 auto; color: #08110f; background: #65ddc4; }
 .choose-seat-message,
 .lobby-footer { margin: 22px 0 0; color: #8fa0b3; text-align: center; }
 

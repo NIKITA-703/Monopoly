@@ -75,10 +75,15 @@ cp .env.example .env
 
 ```dotenv
 GAME_PASSWORD=change-me
+SESSION_SECRET=replace-with-a-long-random-secret
 HOST=127.0.0.1
 PORT=3001
 TURN_SECONDS=70
+TURN_ACTION_SECONDS=30
 TRADE_SECONDS=35
+AUCTION_SECONDS=40
+LOBBY_DISCONNECT_SECONDS=600
+LOBBY_IDLE_SECONDS=900
 DEBUG_ONLINE=0
 DATA_DIR=./data
 ```
@@ -86,10 +91,15 @@ DATA_DIR=./data
 | Переменная | Назначение |
 | --- | --- |
 | `GAME_PASSWORD` | Пароль для входа в игровую комнату |
+| `SESSION_SECRET` | Секрет подписи cookie доступа; на VPS задайте длинную случайную строку и не меняйте её между перезапусками |
 | `HOST` | Адрес, который слушает Node.js-сервер |
 | `PORT` | Порт Node.js-сервера |
 | `TURN_SECONDS` | Время обычного хода |
+| `TURN_ACTION_SECONDS` | Техническое время на завершение уже начатого броска и анимации |
 | `TRADE_SECONDS` | Время ответа на предложение обмена |
+| `AUCTION_SECONDS` | Время на ставку или пас одного участника аукциона |
+| `LOBBY_DISCONNECT_SECONDS` | Через сколько секунд отсутствия освобождается место игрока в лобби |
+| `LOBBY_IDLE_SECONDS` | Через сколько секунд без действий освобождается место подключённого игрока в лобби |
 | `DEBUG_ONLINE` | Подробные сетевые логи при значении `1` |
 | `DATA_DIR` | Каталог файла `monopoly.sqlite` |
 
@@ -192,7 +202,11 @@ GAME_PASSWORD=замените-на-длинный-пароль
 HOST=127.0.0.1
 PORT=3001
 TURN_SECONDS=70
+TURN_ACTION_SECONDS=30
 TRADE_SECONDS=35
+AUCTION_SECONDS=40
+LOBBY_DISCONNECT_SECONDS=600
+LOBBY_IDLE_SECONDS=900
 DEBUG_ONLINE=0
 DATA_DIR=/var/lib/monopoly
 ```
@@ -282,6 +296,20 @@ sudo systemctl start monopoly
 ```
 
 Не удаляйте каталог данных при обычном обновлении — в нём находятся сессии и незавершённая партия.
+
+### Статистика попаданий на поля
+
+Каждое завершённое перемещение сохраняется в таблице `landings`: партия, игрок, его цвет, номер поля и тип перемещения. Сводку по самым посещаемым полям и цветам можно получить так:
+
+```bash
+sqlite3 /var/lib/monopoly/monopoly.sqlite "SELECT tile_name, player_color, COUNT(*) AS visits FROM landings GROUP BY tile_id, player_color ORDER BY visits DESC;"
+```
+
+Статистика одной партии:
+
+```bash
+sqlite3 /var/lib/monopoly/monopoly.sqlite "SELECT tile_name, player_name, player_color, COUNT(*) AS visits FROM landings WHERE game_id = 'ID_ПАРТИИ' GROUP BY tile_id, player_id ORDER BY visits DESC;"
+```
 
 ## Диагностика
 

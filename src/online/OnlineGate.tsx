@@ -22,15 +22,39 @@ const lobbyPlayers = (seats: LobbySeat[]): Player[] =>
 
 export default function OnlineGate() {
   const online = useOnlineLobby()
+  const { reportLobbyActivity } = online
   const [password, setPassword] = useState('')
-  const [nickname, setNickname] = useState('')
-  const [now, setNow] = useState(0)
+  const [nicknameError, setNicknameError] = useState('')
+  const [now, setNow] = useState(() => Date.now())
+
+  const hasDisconnectedSeat = Boolean(
+    online.lobby?.seats.some((seat) => !seat.connected && seat.disconnectedExpiresAt),
+  )
+  const hasIdleSeat = Boolean(
+    online.lobby?.seats.some((seat) => seat.connected && seat.idleExpiresAt),
+  )
 
   useEffect(() => {
-    if (!online.lobby?.countdownEndsAt) return
+    if (!online.lobby?.countdownEndsAt && !hasDisconnectedSeat && !hasIdleSeat) return
     const timer = window.setInterval(() => setNow(Date.now()), 100)
     return () => window.clearInterval(timer)
-  }, [online.lobby?.countdownEndsAt])
+  }, [hasDisconnectedSeat, hasIdleSeat, online.lobby?.countdownEndsAt])
+
+  useEffect(() => {
+    if (online.lobby?.status !== 'lobby' || online.session?.seat === null) return
+    const reportActivity = () => reportLobbyActivity()
+    const reportVisibleActivity = () => {
+      if (document.visibilityState === 'visible') reportActivity()
+    }
+    window.addEventListener('pointerdown', reportActivity)
+    window.addEventListener('keydown', reportActivity)
+    document.addEventListener('visibilitychange', reportVisibleActivity)
+    return () => {
+      window.removeEventListener('pointerdown', reportActivity)
+      window.removeEventListener('keydown', reportActivity)
+      document.removeEventListener('visibilitychange', reportVisibleActivity)
+    }
+  }, [online.lobby?.status, online.session?.seat, reportLobbyActivity])
 
   const players = useMemo(
     () => lobbyPlayers(online.lobby?.seats ?? []),
@@ -95,12 +119,14 @@ export default function OnlineGate() {
               : null
           }
           publishOnlineState={online.publishGameState}
+          beginOnlineTurnAction={online.beginTurnAction}
           turnDeadline={online.turnDeadline}
           turnTimeoutSignal={online.turnTimeout}
           onReturnToLobby={online.returnToLobby}
           sendOnlineChat={online.sendChatMessage}
           disconnectedPlayerIds={online.lobby.seats.filter((seat) => seat.playerId && !seat.connected).map((seat) => seat.playerId as string)}
           onlineGameEvent={online.gameEvent}
+          acknowledgeOnlineGameEvent={online.acknowledgeGameEvent}
           sendOnlineGameEvent={online.sendGameEvent}
         />
       </div>
@@ -109,11 +135,31 @@ export default function OnlineGate() {
 
   const ownSeat = online.session.seat
   const isReady = Boolean(online.session.ready)
-  const displayedNickname = nickname || online.session.nickname
+  const ownLobbySeat = ownSeat === null ? null : online.lobby.seats[ownSeat] ?? null
+  const ownIdleSeconds = ownLobbySeat?.idleExpiresAt
+    ? Math.max(0, Math.ceil((ownLobbySeat.idleExpiresAt - now) / 1000))
+    : null
+  const commitNickname = (draft: string) => {
+    const nickname = draft.trim().replace(/\s+/g, ' ')
+    if (nickname.length < 1) {
+      setNicknameError('Ник не может быть пустым')
+      return false
+    }
+    setNicknameError('')
+    if (nickname !== online.session?.nickname) online.setNickname(nickname)
+    return true
+  }
+
+  const formatDisconnectTime = (expiresAt: number) => {
+    const seconds = Math.max(0, Math.ceil((expiresAt - now) / 1000))
+    const minutes = Math.floor(seconds / 60)
+    return `${String(minutes).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+  }
 
   return (
     <main className="online-screen lobby-screen">
       <section className="lobby-card">
+        {online.status !== 'online' ? <span className="lobby-connection-warning">Переподключение…</span> : null}
         <header className="lobby-header">
           <div>
             <span className="access-kicker">Общая комната</span>
@@ -135,8 +181,14 @@ export default function OnlineGate() {
                     </span>
                     <div className="seat-info">
                       <strong>{seat.nickname}</strong>
-                      <span className={seat.connected ? 'connected' : 'disconnected'}>
-                        {seat.connected ? seat.ready ? 'Готов' : 'В лобби' : 'Переподключается'}
+                      <span className={seat.connected && (!seat.idleExpiresAt || seat.idleExpiresAt - now > 60000) ? 'connected' : 'disconnected'}>
+                        {seat.connected
+                          ? seat.idleExpiresAt && seat.idleExpiresAt - now <= 60000
+                            ? `Неактивен: ${formatDisconnectTime(seat.idleExpiresAt)}`
+                            : seat.ready ? 'Готов' : 'В лобби'
+                          : seat.disconnectedExpiresAt
+                            ? `Освободится через ${formatDisconnectTime(seat.disconnectedExpiresAt)}`
+                            : 'Переподключается'}
                       </span>
                     </div>
                     {isOwn ? <span className="your-seat">Вы</span> : null}
@@ -149,23 +201,39 @@ export default function OnlineGate() {
           })}
         </div>
 
+        {ownIdleSeconds !== null && ownIdleSeconds <= 60 ? (
+          <section className="lobby-idle-warning" role="alert">
+            <div>
+              <strong>Вы давно неактивны</strong>
+              <span>Место освободится через {formatDisconnectTime(ownLobbySeat?.idleExpiresAt ?? now)}</span>
+            </div>
+            <button type="button" onClick={reportLobbyActivity}>Я здесь</button>
+          </section>
+        ) : null}
+
         {ownSeat !== null ? (
           <section className="lobby-controls">
             <label>
               Ваш ник
               <input
-                value={displayedNickname}
+                key={online.session.nickname}
+                defaultValue={online.session.nickname}
                 maxLength={20}
-                onChange={(event) => setNickname(event.target.value)}
-                onBlur={() => online.setNickname(displayedNickname)}
+                onChange={() => setNicknameError('')}
+                onBlur={(event) => commitNickname(event.currentTarget.value)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     event.preventDefault()
-                    online.setNickname(displayedNickname)
+                    event.currentTarget.blur()
+                  }
+                  if (event.key === 'Escape') {
+                    event.currentTarget.value = online.session?.nickname ?? ''
+                    setNicknameError('')
                     event.currentTarget.blur()
                   }
                 }}
               />
+              {nicknameError ? <span className="nickname-error">{nicknameError}</span> : null}
             </label>
             <div className="lobby-actions">
               <button type="button" className="leave-seat-button" onClick={online.leaveSeat}>Освободить место</button>

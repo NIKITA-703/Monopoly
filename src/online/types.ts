@@ -4,6 +4,8 @@ export type LobbySeat = {
   nickname: string | null
   ready: boolean
   connected: boolean
+  disconnectedExpiresAt: number | null
+  idleExpiresAt: number | null
 }
 
 export type LobbyState = {
@@ -30,5 +32,6 @@ export type ServerMessage =
   | { type: 'action_error'; message: string }
   | { type: 'lobby'; lobby: LobbyState; session: OnlineSession }
   | { type: 'game_state'; gameId: string; revision: number; turnDeadline: number | null; senderId?: string | null; state: unknown }
-  | { type: 'turn_timeout'; gameId: string; turnKey: string; actorId: string | null }
+  | { type: 'turn_deadline'; gameId: string; turnDeadline: number | null }
+  | { type: 'turn_timeout'; gameId: string; turnKey: string; timeoutId: string; actorId: string | null }
   | { type: 'game_event'; gameId: string; eventId: string; senderId: string; event: OnlineGameEvent }
