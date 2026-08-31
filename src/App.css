@@ -278,9 +278,9 @@
 
 .tile.owned {
   background:
-    linear-gradient(145deg, color-mix(in srgb, var(--owner-color) 48%, #fff9eb), color-mix(in srgb, var(--owner-color) 28%, #f5f0e6)),
+    linear-gradient(145deg, color-mix(in srgb, var(--owner-color) 64%, #fff9eb), color-mix(in srgb, var(--owner-color) 42%, #f5f0e6)),
     #f4efe6;
-  border-color: color-mix(in srgb, var(--owner-color) 22%, #0b0f15);
+  border-color: color-mix(in srgb, var(--owner-color) 46%, #0b0f15);
 }
 
 .tile.corner {
@@ -503,7 +503,9 @@
   height: 13px;
   border-radius: 50%;
   background: var(--owner-color);
-  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.28);
+  box-shadow:
+    0 0 0 3px rgba(0, 0, 0, 0.34),
+    0 0 10px color-mix(in srgb, var(--owner-color) 72%, transparent);
 }
 
 .tile.side-right .owner-ribbon {
@@ -1054,6 +1056,14 @@ button.secondary {
   white-space: normal;
 }
 
+.event-player-name {
+  color: var(--mentioned-player-color);
+  font-weight: 850;
+  text-shadow:
+    0 0 7px color-mix(in srgb, var(--mentioned-player-color) 78%, transparent),
+    0 0 16px color-mix(in srgb, var(--mentioned-player-color) 48%, transparent);
+}
+
 .event-money-highlight {
   color: #83df67;
   font-weight: 750;
@@ -1099,6 +1109,77 @@ button.secondary {
   align-self: start;
   justify-self: end;
   font-size: calc(13px * var(--readability-boost));
+}
+
+.minimalist-chat .log-list {
+  gap: 0;
+  padding: 4px 9px 4px 4px;
+  border: 0;
+  border-radius: 0;
+  background: rgba(8, 17, 28, 0.72);
+  box-shadow: none;
+}
+
+.minimalist-chat .event-card {
+  min-height: 48px;
+  grid-template-columns: minmax(0, 1fr) 58px;
+  column-gap: 12px;
+  padding: 7px 11px;
+  border: 0;
+  border-bottom: 1px solid rgba(70, 157, 210, 0.22);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.minimalist-chat .event-card:last-child {
+  border-bottom: 0;
+}
+
+.minimalist-chat .event-icon {
+  display: none;
+}
+
+.minimalist-chat .event-card p {
+  grid-column: 1;
+  font-size: calc(22px * var(--readability-boost));
+  line-height: 1.3;
+}
+
+.minimalist-chat .event-card time,
+.minimalist-chat .event-card .event-amount {
+  grid-column: 2;
+}
+
+.minimalist-chat .event-player-name {
+  color: var(--mentioned-player-color);
+  background: linear-gradient(
+    90deg,
+    var(--mentioned-player-color),
+    color-mix(in srgb, var(--mentioned-player-color) 50%, #ffffff)
+  );
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-shadow: none;
+}
+
+.minimalist-chat .event-money-highlight,
+.minimalist-chat .event-chance-highlight,
+.minimalist-chat .event-diamond-highlight,
+.minimalist-chat .event-company {
+  text-shadow: none;
+}
+
+.minimalist-chat .trade-event-card:hover,
+.minimalist-chat .trade-event-card:focus-visible {
+  border-bottom-color: rgba(70, 157, 210, 0.5);
+  background: rgba(36, 112, 157, 0.1);
+  box-shadow: none;
+}
+
+.minimalist-chat .trade-event-details {
+  grid-column: 1 / -1;
 }
 
 .trade-event-card {
@@ -1420,6 +1501,114 @@ button.secondary {
   margin: 8px 0;
   font-size: 42px;
   color: #77e35c;
+}
+
+.settings-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 1100;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(3, 8, 13, 0.7);
+  backdrop-filter: blur(7px);
+}
+
+.settings-dialog {
+  width: min(560px, 100%);
+  padding: 22px;
+  border: 1px solid rgba(76, 184, 231, 0.3);
+  border-radius: 16px;
+  background: #0d1721;
+  color: #eef6fb;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+}
+
+.settings-dialog header,
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.settings-dialog header {
+  padding-bottom: 17px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.settings-dialog small,
+.settings-row span {
+  display: block;
+  color: #94a9ba;
+}
+
+.settings-dialog h2 {
+  margin: 3px 0 0;
+  font-size: 28px;
+}
+
+.settings-close {
+  width: 42px;
+  min-height: 42px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  color: #c7d2dc;
+  background: rgba(255, 255, 255, 0.045);
+  font-size: 27px;
+  line-height: 1;
+}
+
+.settings-row {
+  margin-top: 18px;
+  padding: 15px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.settings-row strong {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 17px;
+}
+
+.settings-row span {
+  font-size: 13px;
+}
+
+.settings-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 64px;
+  min-height: 34px;
+  padding: 3px;
+  border: 1px solid #41515f;
+  border-radius: 999px;
+  background: #202d38;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.settings-switch > span {
+  display: block;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #d9e4eb;
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.38);
+  transform: translateX(0);
+  transition: transform 180ms ease, background 160ms ease;
+}
+
+.settings-switch.enabled {
+  border-color: #47c9b4;
+  background: #198d7d;
+}
+
+.settings-switch.enabled > span {
+  background: #ffffff;
+  transform: translateX(28px);
 }
 
 .winner-close {

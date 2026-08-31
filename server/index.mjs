@@ -496,6 +496,17 @@ const handleLobbyMessage = (socket, token, message) => {
     if (!state || typeof state !== 'object' || !Array.isArray(state.players)) return
     const storedGame = database.prepare('SELECT state_json, updated_at, turn_key, turn_deadline FROM games WHERE id = ?').get(room.game_id)
     const storedState = storedGame?.state_json ? JSON.parse(storedGame.state_json) : null
+    // Chat messages are appended by the server. A gameplay snapshot may have
+    // been prepared just before a chat message arrived, so never let that
+    // slightly older snapshot erase server-owned log entries.
+    if (storedState && Array.isArray(storedState.logs)) {
+      const incomingLogs = Array.isArray(state.logs) ? state.logs : []
+      const storedLogIds = new Set(storedState.logs.map((entry) => entry?.id).filter(Boolean))
+      state.logs = [
+        ...storedState.logs,
+        ...incomingLogs.filter((entry) => !entry?.id || !storedLogIds.has(entry.id)),
+      ]
+    }
     const previousActorId = getTurnActorId(storedState)
     const senderId = publicPlayerId(token)
     const initialActivePlayer = state.players?.[state.activePlayerIndex]

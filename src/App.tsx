@@ -214,14 +214,16 @@ const subscriptionTiles = brandTiles.filter(isSubscriptionTile)
 const fleetTiles = brandTiles.filter(isFleetTile)
 const brandTilesByName = new Map(brandTiles.map((tile) => [tile.name.toLocaleLowerCase('ru-RU'), tile]))
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-const eventHighlightPattern = new RegExp(
-  `(\\$\\d[\\d\\s\\u00a0]*k|Шанс|Алмазик|${brandTiles
-    .map((tile) => tile.name)
-    .sort((left, right) => right.length - left.length)
-    .map(escapeRegExp)
-    .join('|')})`,
-  'giu',
-)
+const eventHighlightBaseTokens = ['Шанс', 'Алмазик', ...brandTiles.map((tile) => tile.name)]
+const minimalistChatStorageKey = 'monopoly:minimalist-chat'
+
+const readMinimalistChatPreference = () => {
+  try {
+    return window.localStorage.getItem(minimalistChatStorageKey) === 'enabled'
+  } catch {
+    return false
+  }
+}
 
 const createLog = (
   text: string,
@@ -460,6 +462,8 @@ function App({
   const [missedTurnCounts, setMissedTurnCounts] = useState<Record<string, number>>({})
   const [eliminatedPlayerIds, setEliminatedPlayerIds] = useState<string[]>([])
   const [winnerId, setWinnerId] = useState<string | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [minimalistChat, setMinimalistChat] = useState(readMinimalistChatPreference)
   const boardRef = useRef<HTMLDivElement | null>(null)
   const movingTokenRef = useRef<HTMLSpanElement | null>(null)
   const logListRef = useRef<HTMLDivElement | null>(null)
@@ -837,11 +841,40 @@ function App({
     return result
   }, [owners, players])
 
-  const renderEventText = (entry: LogEntry) => {
-    if (entry.kind === 'chat') return entry.text
+  const playersByName = useMemo(() => new Map(
+    players.map((player) => [player.name.toLocaleLowerCase('ru-RU'), player]),
+  ), [players])
+  const eventTextPattern = useMemo(() => {
+    const playerNames = players
+      .map((player) => player.name)
+      .filter(Boolean)
+      .sort((left, right) => right.length - left.length)
+      .map(escapeRegExp)
+      .join('|')
+    const alternatives = [
+      '\\$\\d[\\d\\s\\u00a0]*k',
+      ...eventHighlightBaseTokens.map(escapeRegExp),
+      playerNames ? `(?<![\\p{L}\\p{N}_])(?:${playerNames})(?![\\p{L}\\p{N}_])` : '',
+    ].filter(Boolean)
+    return new RegExp(`(${alternatives.join('|')})`, 'giu')
+  }, [players])
 
-    return entry.text.split(eventHighlightPattern).map((part, index) => {
+  const renderEventText = (entry: LogEntry) => {
+    return entry.text.split(eventTextPattern).map((part, index) => {
       if (!part) return null
+
+      const mentionedPlayer = playersByName.get(part.toLocaleLowerCase('ru-RU'))
+      if (mentionedPlayer) {
+        return (
+          <span
+            className="event-player-name"
+            key={`${entry.id}-player-${index}`}
+            style={{ '--mentioned-player-color': mentionedPlayer.color } as CSSProperties}
+          >
+            {part}
+          </span>
+        )
+      }
 
       if (/^\$/u.test(part)) {
         return (
@@ -1345,16 +1378,21 @@ function App({
   const finishAuction = (state: AuctionState, winnerId: string | null, winningBid = 0) => {
     const tile = brandTiles.find((item) => item.id === state.tileId)
     if (!tile) return
+    const eligibleWinnerId = winnerId &&
+      state.participantIds.includes(winnerId) &&
+      !eliminatedPlayerIds.includes(winnerId)
+      ? winnerId
+      : null
 
-    if (winnerId) {
-      const winner = players.find((player) => player.id === winnerId)
-      setOwners((items) => ({ ...items, [tile.id]: winnerId }))
-      applyMoneyDeltas({ [winnerId]: -winningBid })
+    if (eligibleWinnerId) {
+      const winner = players.find((player) => player.id === eligibleWinnerId)
+      setOwners((items) => ({ ...items, [tile.id]: eligibleWinnerId }))
+      applyMoneyDeltas({ [eligibleWinnerId]: -winningBid })
       setLogs((items) => [
         ...items,
         createLog(
           `${winner?.name ?? 'Игрок'} выигрывает аукцион за ${tile.name}: ${money(winningBid)}`,
-          winnerId,
+          eligibleWinnerId,
           'auction',
           -winningBid,
         ),
@@ -1376,7 +1414,7 @@ function App({
     if (!Number.isFinite(increase) || increase < auctionIncrement || bid > auctionBidder.money) return
 
     const eligibleOpponents = auction.participantIds.filter((id) => {
-      if (id === auctionBidder.id || auction.passedIds.includes(id)) return false
+      if (id === auctionBidder.id || auction.passedIds.includes(id) || eliminatedPlayerIds.includes(id)) return false
       const player = players.find((item) => item.id === id)
       return Boolean(player && player.money >= bid + auctionIncrement)
     })
@@ -1410,7 +1448,7 @@ function App({
     ])
 
     const candidates = auction.participantIds.filter((id) => {
-      if (passedIds.includes(id) || id === auction.highestBidderId) return false
+      if (passedIds.includes(id) || id === auction.highestBidderId || eliminatedPlayerIds.includes(id)) return false
       const player = players.find((item) => item.id === id)
       return Boolean(player && player.money >= auction.currentBid + auctionIncrement)
     })
@@ -2690,6 +2728,48 @@ function App({
           <p>Возвращаемся в лобби…</p>
         </section>
       ) : null}
+      {settingsOpen ? (
+        <div className="settings-backdrop" role="presentation" onMouseDown={() => setSettingsOpen(false)}>
+          <section
+            className="settings-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header>
+              <div>
+                <small>Интерфейс</small>
+                <h2 id="settings-title">Настройки</h2>
+              </div>
+              <button type="button" className="settings-close" onClick={() => setSettingsOpen(false)} aria-label="Закрыть">×</button>
+            </header>
+            <div className="settings-row">
+              <div>
+                <strong>Минималистичный чат</strong>
+                <span>Один голубой блок, без иконок и отдельных карточек.</span>
+              </div>
+              <button
+                type="button"
+                className={`settings-switch ${minimalistChat ? 'enabled' : ''}`}
+                role="switch"
+                aria-checked={minimalistChat}
+                onClick={() => setMinimalistChat((enabled) => {
+                  const nextValue = !enabled
+                  try {
+                    window.localStorage.setItem(minimalistChatStorageKey, nextValue ? 'enabled' : 'disabled')
+                  } catch {
+                    // The setting still works for this tab if storage is unavailable.
+                  }
+                  return nextValue
+                })}
+              >
+                <span />
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       <aside className="players-panel" aria-label="Игроки">
         <div className="panel-title">Игроки ({players.length})</div>
 
@@ -2801,6 +2881,12 @@ function App({
             </div>
           )
         })}
+
+        <div className="side-actions">
+          <button type="button" className="quiet-button settings-button" onClick={() => setSettingsOpen(true)}>
+            Настройки
+          </button>
+        </div>
 
       </aside>
 
@@ -3657,7 +3743,7 @@ function App({
             </div>
           )}
 
-            <div className="log-panel">
+            <div className={`log-panel ${minimalistChat ? 'minimalist-chat' : ''}`}>
               <div
                 className="log-list"
                 ref={logListRef}
