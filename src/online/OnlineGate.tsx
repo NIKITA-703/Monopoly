@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from 'react'
 import App, { type OnlineGameState } from '../App'
+import { unlockGameAudio } from '../audio/gameAudio'
 import type { Player } from '../types'
 import './online.css'
 import type { LobbySeat } from './types'
@@ -26,6 +27,16 @@ export default function OnlineGate() {
   const [password, setPassword] = useState('')
   const [nicknameError, setNicknameError] = useState('')
   const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    const unlockAudio = () => unlockGameAudio()
+    window.addEventListener('pointerdown', unlockAudio)
+    window.addEventListener('keydown', unlockAudio)
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio)
+      window.removeEventListener('keydown', unlockAudio)
+    }
+  }, [])
 
   const hasDisconnectedSeat = Boolean(
     online.lobby?.seats.some((seat) => !seat.connected && seat.disconnectedExpiresAt),

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import './App.css'
+import { playGameSound, unlockGameAudio } from './audio/gameAudio'
 import { eventImages, groupColors, groupLabels, initialPlayers as defaultPlayers, tiles } from './gameData'
 import { randomIntInclusive, rollComplexDice } from './random/randomEngine'
 import type { DiceRoll, LogEntry, Player, Tile, TradeLogDetails } from './types'
@@ -37,10 +38,6 @@ const startBonusForLap = (lapNumber: number) => {
   if (lapNumber <= 40) return 500
   return 0
 }
-const turnSoundUrl = new URL('./assets/audio/turn-start.wav', import.meta.url).href
-const tradeSoundUrl = new URL('./assets/audio/trade-request.wav', import.meta.url).href
-const turnWarningSoundUrl = new URL('./assets/audio/turn-warning.wav', import.meta.url).href
-
 type AuctionState = {
   tileId: number
   participantIds: string[]
@@ -472,16 +469,10 @@ function App({
   const [unreadLogCount, setUnreadLogCount] = useState(0)
   const propertyDialogRef = useRef<HTMLElement | null>(null)
   const ownerHoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const turnSoundRef = useRef<HTMLAudioElement | null>(null)
-  const tradeSoundRef = useRef<HTMLAudioElement | null>(null)
-  const turnWarningSoundRef = useRef<HTMLAudioElement | null>(null)
   const lastTurnSoundKeyRef = useRef<string | null>(null)
   const lastTurnWarningSoundKeyRef = useRef<string | null>(null)
   const lastTradeSoundKeyRef = useRef<string | null>(null)
   const lastAuctionSoundKeyRef = useRef<string | null>(null)
-  const audioUnlockedRef = useRef(false)
-  const pendingSoundRef = useRef<HTMLAudioElement | null>(null)
-  const playSoundRef = useRef<(sound: HTMLAudioElement) => void>(() => undefined)
   const appliedOnlineRevisionRef = useRef(0)
   const applyingOnlineStateRef = useRef(false)
   const serverForcedActionRef = useRef(false)
@@ -506,70 +497,18 @@ function App({
     : 70
 
   useEffect(() => {
-    const turnSound = new Audio(turnSoundUrl)
-    const tradeSound = new Audio(tradeSoundUrl)
-    const turnWarningSound = new Audio(turnWarningSoundUrl)
-    turnSound.preload = 'auto'
-    tradeSound.preload = 'auto'
-    turnWarningSound.preload = 'auto'
-    turnSound.volume = 0.58
-    tradeSound.volume = 0.64
-    turnWarningSound.volume = 0.68
-    turnSoundRef.current = turnSound
-    tradeSoundRef.current = tradeSound
-    turnWarningSoundRef.current = turnWarningSound
-    playSoundRef.current = (sound) => {
-      if (!audioUnlockedRef.current) {
-        pendingSoundRef.current = sound
-        return
-      }
-      sound.currentTime = 0
-      void sound.play().catch(() => {
-        // Браузер может запретить звук, но это не должно ломать игру.
-      })
-    }
-
-    const unlockAudio = () => {
-      if (audioUnlockedRef.current) return
-      audioUnlockedRef.current = true
-      const pendingSound = pendingSoundRef.current
-      pendingSoundRef.current = null
-      if (pendingSound) {
-        pendingSound.currentTime = 0
-        void pendingSound.play().catch(() => undefined)
-        return
-      }
-      ;[turnSound, tradeSound, turnWarningSound].forEach((sound) => {
-        sound.muted = true
-        void sound.play()
-          .then(() => {
-            sound.pause()
-            sound.currentTime = 0
-            sound.muted = false
-          })
-          .catch(() => {
-            sound.muted = false
-          })
-      })
-    }
+    const unlockAudio = () => unlockGameAudio()
     window.addEventListener('pointerdown', unlockAudio, { once: true })
     window.addEventListener('keydown', unlockAudio, { once: true })
 
     return () => {
       window.removeEventListener('pointerdown', unlockAudio)
       window.removeEventListener('keydown', unlockAudio)
-      turnSound.pause()
-      tradeSound.pause()
-      turnWarningSound.pause()
-      pendingSoundRef.current = null
-      playSoundRef.current = () => undefined
-      turnSoundRef.current = null
-      tradeSoundRef.current = null
-      turnWarningSoundRef.current = null
     }
   }, [])
 
   useEffect(() => {
+    if (localPlayerId) return
     const turnSoundKey = `${turnSequence}:${activePlayer.id}`
     if (lastTurnSoundKeyRef.current === turnSoundKey) return
     lastTurnSoundKeyRef.current = turnSoundKey
@@ -578,9 +517,7 @@ function App({
       (localPlayerId && localPlayerId !== activePlayer.id)
     ) return
 
-    const sound = turnSoundRef.current
-    if (!sound) return
-    playSoundRef.current(sound)
+    playGameSound('turn')
   }, [activePlayer.id, auction, casino, localPlayerId, pendingPayment, pendingTileId, tradeDraft, turnSequence, winnerId])
 
   useEffect(() => {
@@ -593,11 +530,11 @@ function App({
     const warningKey = `${turnSequence}:${activePlayer.id}`
     if (lastTurnWarningSoundKeyRef.current === warningKey) return
     lastTurnWarningSoundKeyRef.current = warningKey
-    const sound = turnWarningSoundRef.current
-    if (sound) playSoundRef.current(sound)
+    playGameSound('warning')
   }, [activePlayer.id, auction, casino, isRolling, localPlayerId, pendingPayment, pendingTileId, secondsLeft, tradeDraft, turnSequence, winnerId])
 
   useEffect(() => {
+    if (localPlayerId) return
     const tradeSoundKey = tradeDraft?.stage === 'review'
       ? `${turnSequence}:${activePlayer.id}:${tradeDraft.targetPlayerId}:${tradeDraft.offeredMoney}:${tradeDraft.requestedMoney}:${tradeDraft.offeredTileIds.join(',')}:${tradeDraft.requestedTileIds.join(',')}`
       : null
@@ -609,12 +546,11 @@ function App({
     lastTradeSoundKeyRef.current = tradeSoundKey
     if (localPlayerId && localPlayerId !== tradeDraft?.targetPlayerId) return
 
-    const sound = tradeSoundRef.current
-    if (!sound) return
-    playSoundRef.current(sound)
+    playGameSound('trade')
   }, [activePlayer.id, localPlayerId, tradeDraft, turnSequence])
 
   useEffect(() => {
+    if (localPlayerId) return
     const auctionSoundKey = auction
       ? `${turnSequence}:${auction.tileId}:${auction.activeBidderId}:${auction.currentBid}:${auction.highestBidderId ?? 'none'}:${auction.passedIds.join(',')}`
       : null
@@ -626,9 +562,7 @@ function App({
     lastAuctionSoundKeyRef.current = auctionSoundKey
     if (localPlayerId && localPlayerId !== auction?.activeBidderId) return
 
-    const sound = tradeSoundRef.current
-    if (!sound) return
-    playSoundRef.current(sound)
+    playGameSound('trade')
   }, [auction, localPlayerId, turnSequence])
 
   useEffect(() => {
@@ -1981,7 +1915,7 @@ function App({
       const amount = event === 'compliments' ? 300 : 100
       const contributions = otherPlayers.map((payer) => ({
         payer,
-        amount: Math.min(amount, payer.money),
+        amount: Math.max(0, Math.min(amount, payer.money)),
       }))
       const received = contributions.reduce((total, item) => total + item.amount, 0)
       applyMoneyDeltas(Object.fromEntries([
@@ -2747,7 +2681,7 @@ function App({
             <div className="settings-row">
               <div>
                 <strong>Минималистичный чат</strong>
-                <span>Один голубой блок, без иконок и отдельных карточек.</span>
+                <span>Без иконок и отдельных карточек.</span>
               </div>
               <button
                 type="button"

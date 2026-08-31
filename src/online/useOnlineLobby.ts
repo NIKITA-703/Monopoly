@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LobbyState, OnlineGameEvent, OnlineSession, ServerMessage } from './types'
+import { playGameSound } from '../audio/gameAudio'
 
 const sessionStorageKey = 'monopoly.online.session'
 type GameStateMessage = Extract<ServerMessage, { type: 'game_state' }>
@@ -24,6 +25,9 @@ export function useOnlineLobby() {
   const deferredGameStateRef = useRef<GameStateMessage | null>(null)
   const pendingTimeoutIdRef = useRef<string | null>(null)
   const lastLobbyActivitySentRef = useRef(0)
+  const lastImmediateTurnSoundRef = useRef<string | null>(null)
+  const lastImmediateTradeSoundRef = useRef<string | null>(null)
+  const lastImmediateAuctionSoundRef = useRef<string | null>(null)
   const [status, setStatus] = useState<ConnectionStatus>('connecting')
   const [lobby, setLobby] = useState<LobbyState | null>(null)
   const [session, setSession] = useState<OnlineSession | null>(null)
@@ -106,10 +110,77 @@ export function useOnlineLobby() {
             pendingGameEventIdsRef.current.clear()
             deferredGameStateRef.current = null
             setGameEvents([])
+            lastImmediateTurnSoundRef.current = null
+            lastImmediateTradeSoundRef.current = null
+            lastImmediateAuctionSoundRef.current = null
           }
           return
         }
         if (message.type === 'game_state') {
+          const state = message.state as {
+            turnSequence?: number
+            activePlayerIndex?: number
+            players?: Array<{ id: string }>
+            winnerId?: string | null
+            pendingTileId?: number | null
+            pendingPayment?: unknown
+            casino?: unknown
+            tradeDraft?: {
+              stage?: string
+              targetPlayerId?: string
+              offeredMoney?: number
+              requestedMoney?: number
+              offeredTileIds?: number[]
+              requestedTileIds?: number[]
+            } | null
+            auction?: {
+              tileId: number
+              activeBidderId: string
+              currentBid: number
+              highestBidderId?: string | null
+              passedIds?: string[]
+            } | null
+          }
+          const localPlayerId = playerIdRef.current
+          if (localPlayerId && !state.winnerId) {
+            if (state.tradeDraft?.stage === 'review' && state.tradeDraft.targetPlayerId === localPlayerId) {
+              const tradeSoundKey = JSON.stringify([
+                state.turnSequence,
+                state.tradeDraft.targetPlayerId,
+                state.tradeDraft.offeredMoney,
+                state.tradeDraft.requestedMoney,
+                state.tradeDraft.offeredTileIds,
+                state.tradeDraft.requestedTileIds,
+              ])
+              if (lastImmediateTradeSoundRef.current !== tradeSoundKey) {
+                lastImmediateTradeSoundRef.current = tradeSoundKey
+                playGameSound('trade')
+              }
+            } else if (state.auction?.activeBidderId === localPlayerId) {
+              const auctionSoundKey = JSON.stringify([
+                state.turnSequence,
+                state.auction.tileId,
+                state.auction.activeBidderId,
+                state.auction.currentBid,
+                state.auction.highestBidderId,
+                state.auction.passedIds,
+              ])
+              if (lastImmediateAuctionSoundRef.current !== auctionSoundKey) {
+                lastImmediateAuctionSoundRef.current = auctionSoundKey
+                playGameSound('trade')
+              }
+            } else if (
+              !state.tradeDraft && !state.auction && !state.pendingPayment && !state.casino &&
+              state.pendingTileId == null
+            ) {
+              const actorId = state.players?.[state.activePlayerIndex ?? 0]?.id
+              const turnSoundKey = `${state.turnSequence ?? 0}:${actorId ?? 'none'}`
+              if (actorId === localPlayerId && lastImmediateTurnSoundRef.current !== turnSoundKey) {
+                lastImmediateTurnSoundRef.current = turnSoundKey
+                playGameSound('turn')
+              }
+            }
+          }
           // The author already has this optimistic state. Reapplying intermediate
           // echoes makes its dialogs and token briefly jump to an older frame.
           if (message.senderId && message.senderId === playerIdRef.current) {
