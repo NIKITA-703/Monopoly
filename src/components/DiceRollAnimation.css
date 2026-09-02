@@ -1,0 +1,149 @@
+.dice-roll-animation {
+  position: absolute;
+  z-index: 80;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 72px;
+  overflow: hidden;
+  pointer-events: none;
+  perspective: 950px;
+  background: radial-gradient(circle at center, rgba(7, 16, 25, 0.28), transparent 43%);
+}
+
+.animated-die {
+  --die-size: 110px;
+  position: relative;
+  width: var(--die-size);
+  height: var(--die-size);
+  transform-style: preserve-3d;
+  animation: dice-throw var(--dice-animation-duration) cubic-bezier(0.22, 0.62, 0.24, 1) both;
+}
+
+.animated-die.throw-2 {
+  animation-name: dice-throw-second;
+}
+
+.animated-die-cube {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+  animation: dice-tumble-first var(--dice-animation-duration) cubic-bezier(0.2, 0.58, 0.22, 1) both;
+}
+
+.throw-2 .animated-die-cube {
+  animation-name: dice-tumble-second;
+}
+
+.animated-die-face {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: 8px;
+  padding: 18px;
+  border: 2px solid rgba(184, 197, 207, 0.9);
+  border-radius: 20px;
+  background: linear-gradient(145deg, #ffffff, #dce3e7);
+  box-shadow: inset -7px -8px 13px rgba(83, 94, 104, 0.18);
+  backface-visibility: hidden;
+}
+
+.animated-die-face i {
+  width: 17px;
+  height: 17px;
+  place-self: center;
+  border-radius: 50%;
+  background: #111820;
+  opacity: 0;
+  box-shadow: inset 2px 2px 3px rgba(255, 255, 255, 0.15);
+}
+
+.animated-die-face i.visible {
+  opacity: 1;
+}
+
+.animated-die-face.face-1 {
+  transform: translateZ(55px);
+}
+
+.animated-die-face.face-2 {
+  transform: rotateX(90deg) translateZ(55px);
+}
+
+.animated-die-face.face-3 {
+  transform: rotateY(90deg) translateZ(55px);
+}
+
+.animated-die-face.face-4 {
+  transform: rotateY(-90deg) translateZ(55px);
+}
+
+.animated-die-face.face-5 {
+  transform: rotateX(-90deg) translateZ(55px);
+}
+
+.animated-die-face.face-6 {
+  transform: rotateY(180deg) translateZ(55px);
+}
+
+.dice-roll-shadow {
+  position: absolute;
+  width: 340px;
+  height: 62px;
+  margin-top: 178px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.42);
+  filter: blur(17px);
+  animation: dice-shadow var(--dice-animation-duration) ease-out both;
+}
+
+@keyframes dice-throw {
+  0% { transform: translate(-175px, 205px) scale(0.48); opacity: 0; }
+  13% { opacity: 1; }
+  37% { transform: translate(-16px, -105px) scale(1.12); }
+  52% { transform: translate(-7px, 17px) scale(0.98); }
+  60% { transform: translate(-3px, -14px) scale(1.02); }
+  68% { transform: translate(0, 0) scale(1); opacity: 1; }
+  100% { transform: translate(0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes dice-throw-second {
+  0% { transform: translate(185px, 190px) scale(0.45); opacity: 0; }
+  11% { opacity: 1; }
+  36% { transform: translate(20px, -122px) scale(1.1); }
+  53% { transform: translate(9px, 22px) scale(0.97); }
+  60% { transform: translate(4px, -11px) scale(1.02); }
+  68% { transform: translate(0, 0) scale(1); opacity: 1; }
+  100% { transform: translate(0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes dice-tumble-first {
+  0% { transform: rotateX(25deg) rotateY(-35deg) rotateZ(0deg); }
+  55% { transform: rotateX(calc(720deg + var(--dice-final-x))) rotateY(calc(-540deg + var(--dice-final-y))) rotateZ(370deg); }
+  68% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+  100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+}
+
+@keyframes dice-tumble-second {
+  0% { transform: rotateX(-40deg) rotateY(25deg) rotateZ(0deg); }
+  55% { transform: rotateX(calc(-720deg + var(--dice-final-x))) rotateY(calc(720deg + var(--dice-final-y))) rotateZ(-350deg); }
+  68% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+  100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+}
+
+@keyframes dice-shadow {
+  0%, 37% { opacity: 0.08; transform: scale(0.52); }
+  62% { opacity: 0.5; transform: scale(1.08); }
+  100% { opacity: 0.38; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animated-die,
+  .animated-die-cube,
+  .dice-roll-shadow {
+    animation-duration: 1ms;
+  }
+}

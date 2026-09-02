@@ -23,6 +23,7 @@ export type OnlineSession = {
 }
 
 export type OnlineGameEvent =
+  | { kind: 'dice-roll'; playerId: string; dice: [number, number] }
   | { kind: 'movement'; playerId: string; startPosition: number; steps: number; direction: 1 | -1 }
   | { kind: 'direct-movement'; playerId: string; startPosition: number; destinationPosition: number; speedMultiplier: number }
 

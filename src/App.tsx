@@ -1,6 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import './App.css'
 import { playGameSound, unlockGameAudio } from './audio/gameAudio'
+import DiceRollAnimation, {
+  diceRollAnimationDuration,
+  diceRollAnimationEnabled,
+} from './components/DiceRollAnimation'
 import { eventImages, groupColors, groupLabels, initialPlayers as defaultPlayers, tiles } from './gameData'
 import { randomIntInclusive, rollComplexDice } from './random/randomEngine'
 import type { DiceRoll, LogEntry, Player, Tile, TradeLogDetails } from './types'
@@ -436,6 +440,7 @@ function App({
   const [pendingTileId, setPendingTileId] = useState<number | null>(null)
   const [message, setMessage] = useState('')
   const [isRolling, setIsRolling] = useState(false)
+  const [diceAnimation, setDiceAnimation] = useState<{ id: number; values: [number, number] } | null>(null)
   const [movingPlayerId, setMovingPlayerId] = useState<string | null>(null)
   const [hoveredOwnerId, setHoveredOwnerId] = useState<string | null>(null)
   const [hoveredGroup, setHoveredGroup] = useState<string | null>(null)
@@ -480,12 +485,37 @@ function App({
   const forcedOnlinePublishRef = useRef(false)
   const movingPlayerIdRef = useRef<string | null>(null)
   const movementDestinationRef = useRef<number | null>(null)
+  const diceAnimationIdRef = useRef(0)
+  const diceAnimationTimerRef = useRef<number | null>(null)
+  const diceAnimationResolverRef = useRef<(() => void) | null>(null)
   const onlinePublishAuthorityRef = useRef(
     !localPlayerId || localPlayerId === initialGamePlayers[0]?.id,
   )
   const handledTimeoutIdsRef = useRef(new Set<string>())
   const [turnClockNow, setTurnClockNow] = useState(0)
   const [forcedPublishTick, setForcedPublishTick] = useState(0)
+
+  const finishDiceRollAnimation = () => {
+    if (diceAnimationTimerRef.current !== null) window.clearTimeout(diceAnimationTimerRef.current)
+    diceAnimationTimerRef.current = null
+    setDiceAnimation(null)
+    const resolve = diceAnimationResolverRef.current
+    diceAnimationResolverRef.current = null
+    resolve?.()
+  }
+
+  const playDiceRollAnimation = (values: [number, number]) => {
+    if (!diceRollAnimationEnabled) return Promise.resolve()
+    finishDiceRollAnimation()
+    return new Promise<void>((resolve) => {
+      diceAnimationIdRef.current += 1
+      diceAnimationResolverRef.current = resolve
+      setDiceAnimation({ id: diceAnimationIdRef.current, values })
+      diceAnimationTimerRef.current = window.setTimeout(finishDiceRollAnimation, diceRollAnimationDuration)
+    })
+  }
+
+  useEffect(() => () => finishDiceRollAnimation(), [])
 
   const activePlayer = players[activePlayerIndex]
   const movingPlayer = movingPlayerId ? players.find((player) => player.id === movingPlayerId) ?? null : null
@@ -2252,7 +2282,9 @@ function App({
     const eventId = onlineGameEvent.nonce
     const playEvent = async () => {
       try {
-        if (event.kind === 'movement') {
+        if (event.kind === 'dice-roll') {
+          await playDiceRollAnimation(event.dice)
+        } else if (event.kind === 'movement') {
           await animatePlayerMovement(event.playerId, event.startPosition, event.steps, event.direction)
         } else {
           await animatePlayerDirectly(
@@ -2280,6 +2312,8 @@ function App({
     if (!serverForcedActionRef.current) beginOnlineTurnAction?.()
     const roll = await rollComplexDice()
     setLastRoll(roll)
+    sendOnlineGameEvent?.({ kind: 'dice-roll', playerId: players[activePlayerIndex].id, dice: roll.dice })
+    await playDiceRollAnimation(roll.dice)
 
     const player = players[activePlayerIndex]
 
@@ -3029,6 +3063,8 @@ function App({
               </div>
             )
           })}
+
+          {diceAnimation ? <DiceRollAnimation key={diceAnimation.id} values={diceAnimation.values} /> : null}
 
           {movingPlayer ? (
             <span

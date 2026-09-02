@@ -472,6 +472,10 @@ const handleLobbyMessage = (socket, token, message) => {
       return
     }
     const event = message.event
+    const validDiceRoll = event?.kind === 'dice-roll'
+      && event.playerId === senderId
+      && Array.isArray(event.dice) && event.dice.length === 2
+      && event.dice.every((value) => Number.isInteger(value) && value >= 1 && value <= 6)
     const validMovement = event?.kind === 'movement'
       && event.playerId === senderId
       && Number.isInteger(event.startPosition) && event.startPosition >= 0 && event.startPosition < 40
@@ -482,12 +486,12 @@ const handleLobbyMessage = (socket, token, message) => {
       && Number.isInteger(event.startPosition) && event.startPosition >= 0 && event.startPosition < 40
       && Number.isInteger(event.destinationPosition) && event.destinationPosition >= 0 && event.destinationPosition < 40
       && Number.isFinite(event.speedMultiplier) && event.speedMultiplier >= 0.5 && event.speedMultiplier <= 3
-    if (!validMovement && !validDirectMovement) {
+    if (!validDiceRoll && !validMovement && !validDirectMovement) {
       trace('game_event_rejected', { gameId: room.game_id, senderId, reason: 'invalid_payload' })
       return
     }
     const payload = { type: 'game_event', gameId: room.game_id, eventId: randomUUID(), senderId, event }
-    recordLanding(room.game_id, state, event)
+    if (validMovement || validDirectMovement) recordLanding(room.game_id, state, event)
     for (const client of clients.keys()) send(client, payload)
     trace('game_event', { gameId: room.game_id, senderId, kind: event.kind })
     return
