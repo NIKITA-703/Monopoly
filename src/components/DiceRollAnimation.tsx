@@ -52,7 +52,7 @@ type DiceRollAnimationProps = {
 }
 
 export default function DiceRollAnimation({ values }: DiceRollAnimationProps) {
-  const [animationVariant] = useState(() => Math.floor(Math.random() * 4) + 1)
+  const [animationVariant] = useState(() => Math.floor(Math.random() * 6) + 1)
 
   if (!diceRollAnimationEnabled) return null
 

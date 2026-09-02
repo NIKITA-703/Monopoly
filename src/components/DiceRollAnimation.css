@@ -84,6 +84,38 @@
   animation-name: dice-tumble-side-second;
 }
 
+.dice-animation-variant-5 .throw-1 {
+  animation-name: dice-throw-drop-first;
+}
+
+.dice-animation-variant-5 .throw-2 {
+  animation-name: dice-throw-drop-second;
+}
+
+.dice-animation-variant-5 .throw-1 .animated-die-cube {
+  animation-name: dice-tumble-drop-first;
+}
+
+.dice-animation-variant-5 .throw-2 .animated-die-cube {
+  animation-name: dice-tumble-drop-second;
+}
+
+.dice-animation-variant-6 .throw-1 {
+  animation-name: dice-throw-orbit-first;
+}
+
+.dice-animation-variant-6 .throw-2 {
+  animation-name: dice-throw-orbit-second;
+}
+
+.dice-animation-variant-6 .throw-1 .animated-die-cube {
+  animation-name: dice-tumble-orbit-first;
+}
+
+.dice-animation-variant-6 .throw-2 .animated-die-cube {
+  animation-name: dice-tumble-orbit-second;
+}
+
 .animated-die-face {
   position: absolute;
   inset: 0;
@@ -269,6 +301,70 @@
 @keyframes dice-tumble-side-second {
   0% { transform: rotateX(-15deg) rotateY(35deg) rotateZ(25deg); }
   55% { transform: rotateX(calc(-1080deg + var(--dice-final-x))) rotateY(calc(360deg + var(--dice-final-y))) rotateZ(-610deg); }
+  68%, 100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+}
+
+@keyframes dice-throw-drop-first {
+  0% { transform: translate(-65px, -310px) scale(0.55); opacity: 0; }
+  10% { opacity: 1; }
+  31% { transform: translate(-38px, -150px) scale(0.88); }
+  49% { transform: translate(-10px, 25px) scale(0.96); }
+  57% { transform: translate(-5px, -32px) scale(1.05); }
+  63% { transform: translate(-2px, 8px) scale(0.99); }
+  68%, 100% { transform: translate(0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes dice-throw-drop-second {
+  0% { transform: translate(75px, -350px) scale(0.5); opacity: 0; }
+  12% { opacity: 1; }
+  34% { transform: translate(42px, -165px) scale(0.9); }
+  50% { transform: translate(12px, 28px) scale(0.95); }
+  58% { transform: translate(6px, -27px) scale(1.04); }
+  64% { transform: translate(2px, 7px) scale(0.99); }
+  68%, 100% { transform: translate(0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes dice-tumble-drop-first {
+  0% { transform: rotateX(-20deg) rotateY(-15deg) rotateZ(10deg); }
+  50% { transform: rotateX(calc(720deg + var(--dice-final-x))) rotateY(calc(540deg + var(--dice-final-y))) rotateZ(-300deg); }
+  68%, 100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+}
+
+@keyframes dice-tumble-drop-second {
+  0% { transform: rotateX(25deg) rotateY(20deg) rotateZ(-10deg); }
+  51% { transform: rotateX(calc(-720deg + var(--dice-final-x))) rotateY(calc(-540deg + var(--dice-final-y))) rotateZ(320deg); }
+  68%, 100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+}
+
+@keyframes dice-throw-orbit-first {
+  0% { transform: translate(-230px, 150px) scale(0.46); opacity: 0; }
+  11% { opacity: 1; }
+  28% { transform: translate(25px, -175px) scale(0.92); }
+  43% { transform: translate(105px, -45px) scale(1.12); }
+  53% { transform: translate(20px, 20px) scale(0.97); }
+  61% { transform: translate(-8px, -14px) scale(1.02); }
+  68%, 100% { transform: translate(0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes dice-throw-orbit-second {
+  0% { transform: translate(240px, 145px) scale(0.46); opacity: 0; }
+  11% { opacity: 1; }
+  28% { transform: translate(-30px, -180px) scale(0.94); }
+  43% { transform: translate(-110px, -38px) scale(1.1); }
+  53% { transform: translate(-22px, 22px) scale(0.96); }
+  61% { transform: translate(8px, -13px) scale(1.02); }
+  68%, 100% { transform: translate(0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes dice-tumble-orbit-first {
+  0% { transform: rotateX(15deg) rotateY(-35deg) rotateZ(0deg); }
+  54% { transform: rotateX(calc(900deg + var(--dice-final-x))) rotateY(calc(720deg + var(--dice-final-y))) rotateZ(700deg); }
+  68%, 100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+}
+
+@keyframes dice-tumble-orbit-second {
+  0% { transform: rotateX(-20deg) rotateY(30deg) rotateZ(0deg); }
+  54% { transform: rotateX(calc(-900deg + var(--dice-final-x))) rotateY(calc(-720deg + var(--dice-final-y))) rotateZ(-700deg); }
   68%, 100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
 }
 
