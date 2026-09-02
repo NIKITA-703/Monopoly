@@ -36,6 +36,54 @@
   animation-name: dice-tumble-second;
 }
 
+.dice-animation-variant-2 .throw-1 {
+  animation-name: dice-throw-high-first;
+}
+
+.dice-animation-variant-2 .throw-2 {
+  animation-name: dice-throw-high-second;
+}
+
+.dice-animation-variant-2 .throw-1 .animated-die-cube {
+  animation-name: dice-tumble-high-first;
+}
+
+.dice-animation-variant-2 .throw-2 .animated-die-cube {
+  animation-name: dice-tumble-high-second;
+}
+
+.dice-animation-variant-3 .throw-1 {
+  animation-name: dice-throw-cross-first;
+}
+
+.dice-animation-variant-3 .throw-2 {
+  animation-name: dice-throw-cross-second;
+}
+
+.dice-animation-variant-3 .throw-1 .animated-die-cube {
+  animation-name: dice-tumble-cross-first;
+}
+
+.dice-animation-variant-3 .throw-2 .animated-die-cube {
+  animation-name: dice-tumble-cross-second;
+}
+
+.dice-animation-variant-4 .throw-1 {
+  animation-name: dice-throw-side-first;
+}
+
+.dice-animation-variant-4 .throw-2 {
+  animation-name: dice-throw-side-second;
+}
+
+.dice-animation-variant-4 .throw-1 .animated-die-cube {
+  animation-name: dice-tumble-side-first;
+}
+
+.dice-animation-variant-4 .throw-2 .animated-die-cube {
+  animation-name: dice-tumble-side-second;
+}
+
 .animated-die-face {
   position: absolute;
   inset: 0;
@@ -132,6 +180,96 @@
   55% { transform: rotateX(calc(-720deg + var(--dice-final-x))) rotateY(calc(720deg + var(--dice-final-y))) rotateZ(-350deg); }
   68% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
   100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+}
+
+@keyframes dice-throw-high-first {
+  0% { transform: translate(-105px, 245px) scale(0.42); opacity: 0; }
+  12% { opacity: 1; }
+  34% { transform: translate(-52px, -185px) scale(1.08); }
+  52% { transform: translate(-8px, 20px) scale(0.97); }
+  60% { transform: translate(-3px, -18px) scale(1.03); }
+  68%, 100% { transform: translate(0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes dice-throw-high-second {
+  0% { transform: translate(115px, 255px) scale(0.44); opacity: 0; }
+  10% { opacity: 1; }
+  36% { transform: translate(58px, -205px) scale(1.11); }
+  53% { transform: translate(10px, 23px) scale(0.96); }
+  61% { transform: translate(4px, -15px) scale(1.02); }
+  68%, 100% { transform: translate(0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes dice-tumble-high-first {
+  0% { transform: rotateX(15deg) rotateY(-30deg) rotateZ(0deg); }
+  54% { transform: rotateX(calc(900deg + var(--dice-final-x))) rotateY(calc(-720deg + var(--dice-final-y))) rotateZ(430deg); }
+  68%, 100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+}
+
+@keyframes dice-tumble-high-second {
+  0% { transform: rotateX(-25deg) rotateY(20deg) rotateZ(0deg); }
+  55% { transform: rotateX(calc(-900deg + var(--dice-final-x))) rotateY(calc(900deg + var(--dice-final-y))) rotateZ(-420deg); }
+  68%, 100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+}
+
+@keyframes dice-throw-cross-first {
+  0% { transform: translate(-290px, 70px) scale(0.48); opacity: 0; }
+  12% { opacity: 1; }
+  36% { transform: translate(78px, -118px) scale(1.1); }
+  52% { transform: translate(18px, 18px) scale(0.97); }
+  60% { transform: translate(7px, -13px) scale(1.02); }
+  68%, 100% { transform: translate(0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes dice-throw-cross-second {
+  0% { transform: translate(300px, 85px) scale(0.46); opacity: 0; }
+  11% { opacity: 1; }
+  35% { transform: translate(-82px, -132px) scale(1.12); }
+  53% { transform: translate(-19px, 21px) scale(0.96); }
+  61% { transform: translate(-6px, -12px) scale(1.02); }
+  68%, 100% { transform: translate(0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes dice-tumble-cross-first {
+  0% { transform: rotateX(20deg) rotateY(-25deg) rotateZ(-20deg); }
+  55% { transform: rotateX(calc(540deg + var(--dice-final-x))) rotateY(calc(900deg + var(--dice-final-y))) rotateZ(-520deg); }
+  68%, 100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+}
+
+@keyframes dice-tumble-cross-second {
+  0% { transform: rotateX(-30deg) rotateY(30deg) rotateZ(20deg); }
+  55% { transform: rotateX(calc(-540deg + var(--dice-final-x))) rotateY(calc(-900deg + var(--dice-final-y))) rotateZ(510deg); }
+  68%, 100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+}
+
+@keyframes dice-throw-side-first {
+  0% { transform: translate(-310px, -35px) scale(0.5); opacity: 0; }
+  12% { opacity: 1; }
+  34% { transform: translate(-72px, -145px) scale(1.09); }
+  51% { transform: translate(16px, 20px) scale(0.97); }
+  60% { transform: translate(-6px, -13px) scale(1.02); }
+  68%, 100% { transform: translate(0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes dice-throw-side-second {
+  0% { transform: translate(320px, -15px) scale(0.48); opacity: 0; }
+  10% { opacity: 1; }
+  37% { transform: translate(75px, -125px) scale(1.11); }
+  53% { transform: translate(-14px, 22px) scale(0.96); }
+  61% { transform: translate(5px, -12px) scale(1.02); }
+  68%, 100% { transform: translate(0, 0) scale(1); opacity: 1; }
+}
+
+@keyframes dice-tumble-side-first {
+  0% { transform: rotateX(10deg) rotateY(-45deg) rotateZ(-25deg); }
+  55% { transform: rotateX(calc(1080deg + var(--dice-final-x))) rotateY(calc(-360deg + var(--dice-final-y))) rotateZ(620deg); }
+  68%, 100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
+}
+
+@keyframes dice-tumble-side-second {
+  0% { transform: rotateX(-15deg) rotateY(35deg) rotateZ(25deg); }
+  55% { transform: rotateX(calc(-1080deg + var(--dice-final-x))) rotateY(calc(360deg + var(--dice-final-y))) rotateZ(-610deg); }
+  68%, 100% { transform: rotateX(var(--dice-final-x)) rotateY(var(--dice-final-y)) rotateZ(0deg); }
 }
 
 @keyframes dice-shadow {

@@ -1,4 +1,4 @@
-import type { CSSProperties } from 'react'
+import { useState, type CSSProperties } from 'react'
 import './DiceRollAnimation.css'
 
 // Для быстрого отключения анимации достаточно поменять значение на false.
@@ -52,11 +52,13 @@ type DiceRollAnimationProps = {
 }
 
 export default function DiceRollAnimation({ values }: DiceRollAnimationProps) {
+  const [animationVariant] = useState(() => Math.floor(Math.random() * 4) + 1)
+
   if (!diceRollAnimationEnabled) return null
 
   return (
     <div
-      className="dice-roll-animation"
+      className={`dice-roll-animation dice-animation-variant-${animationVariant}`}
       aria-hidden="true"
       style={{ '--dice-animation-duration': `${diceRollAnimationDuration}ms` } as CSSProperties}
     >
