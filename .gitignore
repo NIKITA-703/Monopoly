@@ -17,7 +17,19 @@ data/*.sqlite*
 # Local screenshots, recordings and Codex work artifacts
 .artifacts/
 .codex-*.png
-pic/Запись*.gif
+/pic/Запись*
+/pic/Снимок*
+/pic/Скриншот*
+/pic/Screenshot*
+/pic/*состояние*.png
+
+# Local planning and review notes
+/задачи.txt
+/css.txt
+/ПЛАН_*.md
+/ОТЧЕТ_*.md
+/ОТЧЁТ_*.md
+/REPORT_*.md
 
 # Editor directories and files
 .vscode/*
