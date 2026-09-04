@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { WebSocket, WebSocketServer } from 'ws'
 import { createAuditLog } from './audit-log.mjs'
+import { validateGameState } from './game-state-validation.mjs'
 
 const rootDirectory = fileURLToPath(new URL('..', import.meta.url))
 const dataDirectory = process.env.DATA_DIR ? normalize(process.env.DATA_DIR) : join(rootDirectory, 'data')
@@ -571,10 +572,23 @@ const handleLobbyMessage = (socket, token, message) => {
   }
 
   if (message.type === 'game_snapshot' && room.status === 'playing' && room.game_id) {
-    const state = normalizeEliminatedState(message.state)
+    const state = message.state
     if (!state || typeof state !== 'object' || !Array.isArray(state.players)) return
     const storedGame = database.prepare('SELECT state_json, updated_at, turn_key, turn_deadline FROM games WHERE id = ?').get(room.game_id)
     const storedState = storedGame?.state_json ? JSON.parse(storedGame.state_json) : null
+    const expectedPlayerIds = storedState?.players?.map((player) => player.id)
+      ?? sessionRows().filter((item) => item.seat !== null).map((item) => publicPlayerId(item.token))
+    const validationError = validateGameState(state, expectedPlayerIds)
+    if (validationError) {
+      const senderId = publicPlayerId(token)
+      trace('snapshot_rejected', {
+        gameId: room.game_id,
+        senderId,
+        reason: validationError,
+      })
+      send(socket, { type: 'action_error', message: 'Сервер отклонил некорректное состояние игры' })
+      return
+    }
     // Chat messages are appended by the server. A gameplay snapshot may have
     // been prepared just before a chat message arrived, so never let that
     // slightly older snapshot erase server-owned log entries.
@@ -603,6 +617,30 @@ const handleLobbyMessage = (socket, token, message) => {
       timeoutController.turnKey === storedGame?.turn_key &&
       timeoutController.claimedBy === senderId,
     )
+    const previousEliminatedIds = new Set(storedState?.eliminatedPlayerIds ?? [])
+    const submittedEliminatedIds = new Set(state.eliminatedPlayerIds ?? [])
+    const allowedNewEliminatedId = mayHandleTimeout
+      ? storedState?.players?.[storedState.activePlayerIndex]?.id
+      : senderId
+    const invalidElimination = !storedState
+      ? submittedEliminatedIds.size > 0
+      : [...previousEliminatedIds].some((id) => !submittedEliminatedIds.has(id)) ||
+        [...submittedEliminatedIds].some((id) =>
+          !previousEliminatedIds.has(id) && id !== allowedNewEliminatedId)
+    if (invalidElimination) {
+      trace('snapshot_rejected', {
+        gameId: room.game_id,
+        senderId,
+        reason: 'invalid_elimination',
+      })
+      send(socket, { type: 'action_error', message: 'Сервер отклонил некорректное исключение игрока' })
+      return
+    }
+    const remainingPlayerIds = state.players
+      .map((player) => player.id)
+      .filter((playerId) => !submittedEliminatedIds.has(playerId))
+    state.winnerId = remainingPlayerIds.length === 1 ? remainingPlayerIds[0] : null
+    normalizeEliminatedState(state)
     const deadlineExpired = Boolean(storedGame?.turn_deadline && storedGame.turn_deadline <= Date.now())
     if ((submittedTimeoutId && !mayHandleTimeout) || (deadlineExpired && !mayHandleTimeout)) {
       trace('snapshot_rejected', {
@@ -828,7 +866,7 @@ const server = createServer(async (request, response) => {
   }
 })
 
-const webSocketServer = new WebSocketServer({ server, path: '/ws' })
+const webSocketServer = new WebSocketServer({ server, path: '/ws', maxPayload: 1024 * 1024 })
 webSocketServer.on('connection', (socket, request) => {
   socket.hasAccess = hasAccessCookie(request)
   socket.isAlive = true

@@ -182,6 +182,23 @@ try {
   send(first, { type: 'game_snapshot', state })
   const initialSnapshot = await waitFor(second.socket, (message) => message.type === 'game_state' && message.state.players)
   assert.equal(initialSnapshot.senderId, ids[0], 'Снимок должен содержать ID отправителя')
+  send(first, {
+    type: 'game_snapshot',
+    state: {
+      ...state,
+      players: state.players.map((player, index) => index === 0 ? { ...player, money: -1 } : player),
+    },
+  })
+  const invalidMoneyError = await waitFor(first.socket, (message) =>
+    message.type === 'action_error' && message.message.includes('некорректное состояние'))
+  assert.ok(invalidMoneyError, 'Сервер должен отклонять отрицательный баланс')
+  send(first, {
+    type: 'game_snapshot',
+    state: { ...state, eliminatedPlayerIds: [ids[1]] },
+  })
+  const invalidEliminationError = await waitFor(first.socket, (message) =>
+    message.type === 'action_error' && message.message.includes('исключение игрока'))
+  assert.ok(invalidEliminationError, 'Игрок не должен исключать другого участника')
   send(first, { type: 'turn_action_started' })
   const lockedTurn = await waitFor(second.socket, (message) => message.type === 'turn_deadline')
   assert.ok(lockedTurn.turnDeadline - Date.now() > 25000, 'Нажатие броска должно блокировать старый таймер на время действия')
@@ -317,14 +334,16 @@ try {
     },
   })
   const eliminatedSnapshot = await waitFor(first.socket, (message) =>
-    message.type === 'game_state' && message.state.winnerId === ids[0])
+    message.type === 'game_state' && message.state.eliminatedPlayerIds?.includes(ids[1]))
   const eliminatedPlayer = eliminatedSnapshot.state.players.find((player) => player.id === ids[1])
   assert.equal(eliminatedPlayer.money, 0, 'Баланс выбывшего игрока должен быть обнулён сервером')
   assert.equal(eliminatedPlayer.lastDelta, 0, 'Последнее изменение баланса выбывшего должно быть обнулено')
   assert.equal(eliminatedSnapshot.state.owners[13], undefined, 'Поля выбывшего должны вернуться Банку')
+  assert.equal(eliminatedSnapshot.state.winnerId, null, 'Клиент не должен самостоятельно назначать победителя')
 
   queues.set(first.socket, queues.get(first.socket).filter((message) =>
     message.type !== 'lobby' || message.lobby.status !== 'lobby'))
+  send(first, { type: 'chat_message', text: '!!&& restart' })
   await waitFor(first.socket, (message) => message.type === 'lobby' && message.lobby.status === 'lobby')
 
   for (const client of [first, reconnected, third, fourth, fifth]) {
