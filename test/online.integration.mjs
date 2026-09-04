@@ -203,14 +203,19 @@ try {
     message.type === 'game_state' && message.state.auction?.activeBidderId === ids[0])
   assert.ok(auctionSnapshot.turnDeadline - Date.now() > 1000, 'Аукционный таймер должен учитывать AUCTION_SECONDS')
   assert.ok(auctionSnapshot.turnDeadline - Date.now() <= 2200, 'Аукционный таймер не должен использовать время обычного хода')
-  const auctionTimeoutOffer = await waitFor(first.socket, (message) =>
-    message.type === 'turn_timeout' && message.actorId === ids[0], 4000)
-  send(first, { type: 'turn_timeout_claim', timeoutId: auctionTimeoutOffer.timeoutId })
-  const auctionTimeout = await waitFor(first.socket, (message) =>
-    message.type === 'turn_timeout_granted' && message.timeoutId === auctionTimeoutOffer.timeoutId, 4000)
-  assert.equal(auctionTimeout.actorId, ids[0], 'По таймеру должен выйти текущий участник аукциона')
-  send(first, { type: 'game_snapshot', timeoutId: auctionTimeout.timeoutId, state })
+  send(first, { type: 'client_presence', visible: false })
+  send(second, { type: 'client_presence', visible: true })
+  const auctionTimeout = await waitFor(second.socket, (message) =>
+    message.type === 'turn_timeout_granted' && message.actorId === ids[0], 4000)
+  assert.equal(
+    auctionTimeout.actorId,
+    ids[0],
+    'Сервер должен поручить таймаут активной вкладке, даже когда ходит другой игрок',
+  )
+  send(second, { type: 'game_snapshot', timeoutId: auctionTimeout.timeoutId, state })
   await waitFor(second.socket, (message) => message.type === 'game_state' && message.state.auction === null)
+  send(first, { type: 'client_presence', visible: true })
+  send(second, { type: 'client_presence', visible: false })
   send(first, { type: 'game_event', event: { kind: 'movement', playerId: ids[0], startPosition: 0, steps: 6, direction: 1 } })
   const movementEvents = await Promise.all([second, third, fourth, fifth].map((client) =>
     waitFor(client.socket, (message) => message.type === 'game_event' && message.event.kind === 'movement')))
@@ -344,11 +349,8 @@ try {
   await waitFor(reconnected.socket, (message) =>
     message.type === 'game_state' && message.gameId === timeoutGame.lobby.gameId)
   for (let missedTurn = 1; missedTurn <= 3; missedTurn += 1) {
-    const timeoutOffer = await waitFor(first.socket, (message) =>
-      message.type === 'turn_timeout' && message.gameId === timeoutGame.lobby.gameId, 7000)
-    send(first, { type: 'turn_timeout_claim', timeoutId: timeoutOffer.timeoutId })
     const timeout = await waitFor(first.socket, (message) =>
-      message.type === 'turn_timeout_granted' && message.timeoutId === timeoutOffer.timeoutId, 4000)
+      message.type === 'turn_timeout_granted' && message.gameId === timeoutGame.lobby.gameId, 7000)
     send(first, {
       type: 'game_snapshot',
       timeoutId: timeout.timeoutId,

@@ -59,7 +59,18 @@ export function useOnlineLobby() {
         setGameState(deferredState)
       }
     }
-    document.addEventListener('visibilitychange', applyDeferredStateWithoutAnimation)
+    const reportPresence = () => {
+      if (socketRef.current?.readyState !== WebSocket.OPEN) return
+      socketRef.current.send(JSON.stringify({
+        type: 'client_presence',
+        visible: document.visibilityState === 'visible',
+      }))
+    }
+    const handleVisibilityChange = () => {
+      applyDeferredStateWithoutAnimation()
+      reportPresence()
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
     // sessionStorage сохраняет владельца текущей вкладки, а localStorage позволяет
     // вернуть того же игрока после закрытия вкладки или восстановления Chrome.
     const durableToken = window.localStorage.getItem(persistentSessionStorageKey)
@@ -101,6 +112,10 @@ export function useOnlineLobby() {
           passwordRef.current = ''
           setError('')
           setStatus('online')
+          socket.send(JSON.stringify({
+            type: 'client_presence',
+            visible: document.visibilityState === 'visible',
+          }))
           return
         }
         if (message.type === 'auth_error') {
@@ -229,10 +244,6 @@ export function useOnlineLobby() {
           setTurnDeadline(message.turnDeadline)
           return
         }
-        if (message.type === 'turn_timeout') {
-          socket.send(JSON.stringify({ type: 'turn_timeout_claim', timeoutId: message.timeoutId }))
-          return
-        }
         if (message.type === 'turn_timeout_granted') {
           pendingTimeoutIdRef.current = message.timeoutId
           setTurnTimeout({ timeoutId: message.timeoutId, actorId: message.actorId })
@@ -277,7 +288,7 @@ export function useOnlineLobby() {
     connect()
     return () => {
       disposed = true
-      document.removeEventListener('visibilitychange', applyDeferredStateWithoutAnimation)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
       socketRef.current?.close()
     }

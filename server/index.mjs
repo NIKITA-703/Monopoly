@@ -72,6 +72,7 @@ const passwordDigest = createHash('sha256').update(configuredPassword).digest()
 const accessCookieName = 'monopoly_access'
 const accessCookieValue = createHmac('sha256', sessionSecret).update('monopoly-access-v1').digest('hex')
 const clients = new Map()
+const clientPresence = new Map()
 let countdownTimer = null
 const timeoutControllers = new Map()
 const gameReturnTimers = new Map()
@@ -449,6 +450,7 @@ const authenticate = (socket, payload) => {
     if (client !== socket && clientToken === token) client.close(4002, 'Session opened in another tab')
   }
   clients.set(socket, token)
+  clientPresence.set(socket, { visible: false, updatedAt: now })
   send(socket, { type: 'auth_ok', token })
   broadcastLobby()
   const room = roomRow()
@@ -461,32 +463,11 @@ const handleLobbyMessage = (socket, token, message) => {
   const session = database.prepare('SELECT * FROM sessions WHERE token = ?').get(token)
   if (!session) return
 
-  if (message.type === 'turn_timeout_claim' && room.status === 'playing' && room.game_id) {
-    const game = database.prepare('SELECT state_json, turn_key FROM games WHERE id = ?').get(room.game_id)
-    const state = game?.state_json ? JSON.parse(game.state_json) : null
-    const controller = timeoutControllers.get(room.game_id)
-    const senderId = publicPlayerId(token)
-    const isParticipant = Boolean(state?.players?.some((player) => player.id === senderId))
-    if (
-      !controller || !isParticipant ||
-      controller.timeoutId !== message.timeoutId ||
-      controller.turnKey !== game?.turn_key
-    ) return
-
-    const now = Date.now()
-    if (controller.claimedBy && controller.claimExpiresAt > now) return
-    controller.claimedBy = senderId
-    controller.claimExpiresAt = now + 30000
-    timeoutControllers.set(room.game_id, controller)
-    const actorId = getTurnActorId(state)
-    send(socket, {
-      type: 'turn_timeout_granted',
-      gameId: room.game_id,
-      turnKey: controller.turnKey,
-      timeoutId: controller.timeoutId,
-      actorId,
+  if (message.type === 'client_presence') {
+    clientPresence.set(socket, {
+      visible: message.visible === true,
+      updatedAt: Date.now(),
     })
-    trace('turn_timeout_claimed', { gameId: room.game_id, actorId, handlerId: senderId, timeoutId: controller.timeoutId })
     return
   }
 
@@ -876,6 +857,7 @@ webSocketServer.on('connection', (socket, request) => {
     clearTimeout(authTimeout)
     const token = clients.get(socket)
     clients.delete(socket)
+    clientPresence.delete(socket)
     if (token && ![...clients.values()].includes(token)) {
       const room = roomRow()
       database.prepare(`
@@ -939,23 +921,54 @@ setInterval(() => {
   const participantSockets = [...clients.entries()].filter(([, token]) =>
     participantIds.has(publicPlayerId(token)))
   if (participantSockets.length === 0) return
+  const now = Date.now()
   const existingController = timeoutControllers.get(room.game_id)
   const controller = existingController?.turnKey === game.turn_key
     ? existingController
-    : { timeoutId: randomUUID(), turnKey: game.turn_key, lastSentAt: 0, claimedBy: null, claimExpiresAt: 0 }
-  if (controller.claimedBy && controller.claimExpiresAt > Date.now()) return
-  if (Date.now() - controller.lastSentAt < 2000) return
-  controller.lastSentAt = Date.now()
+    : {
+        timeoutId: randomUUID(),
+        turnKey: game.turn_key,
+        lastSentAt: 0,
+        claimedBy: null,
+        claimExpiresAt: 0,
+        attemptedHandlerIds: new Set(),
+      }
+  if (!(controller.attemptedHandlerIds instanceof Set)) controller.attemptedHandlerIds = new Set()
+  if (controller.claimedBy && controller.claimExpiresAt > now) return
+  if (controller.claimedBy) controller.attemptedHandlerIds.add(controller.claimedBy)
+  if (now - controller.lastSentAt < 1000) return
+
+  const orderedSockets = [...participantSockets].sort(([firstSocket], [secondSocket]) =>
+    Number(clientPresence.get(secondSocket)?.visible === true) -
+    Number(clientPresence.get(firstSocket)?.visible === true))
+  let handler = orderedSockets.find(([, token]) =>
+    !controller.attemptedHandlerIds.has(publicPlayerId(token)))
+  if (!handler) {
+    controller.attemptedHandlerIds.clear()
+    handler = orderedSockets[0]
+  }
+  if (!handler) return
+
+  const [handlerSocket, handlerToken] = handler
+  const handlerId = publicPlayerId(handlerToken)
+  controller.claimedBy = handlerId
+  controller.claimExpiresAt = now + 10000
+  controller.lastSentAt = now
   timeoutControllers.set(room.game_id, controller)
-  trace('turn_timeout', { gameId: room.game_id, actorId, timeoutId: controller.timeoutId })
-  const payload = {
-    type: 'turn_timeout',
+  trace('turn_timeout_assigned', {
+    gameId: room.game_id,
+    actorId,
+    handlerId,
+    handlerVisible: clientPresence.get(handlerSocket)?.visible === true,
+    timeoutId: controller.timeoutId,
+  })
+  send(handlerSocket, {
+    type: 'turn_timeout_granted',
     gameId: room.game_id,
     turnKey: game.turn_key,
     timeoutId: controller.timeoutId,
     actorId,
-  }
-  for (const [socket] of participantSockets) send(socket, payload)
+  })
 }, 500).unref()
 
 server.listen(port, host, () => {
