@@ -3,6 +3,7 @@ import type { LobbyState, OnlineGameEvent, OnlineSession, ServerMessage } from '
 import { playGameSound } from '../audio/gameAudio'
 
 const sessionStorageKey = 'monopoly.online.session'
+const persistentSessionStorageKey = 'monopoly.online.player-session'
 type GameStateMessage = Extract<ServerMessage, { type: 'game_state' }>
 const webSocketUrl = () => {
   const configuredUrl = import.meta.env.VITE_WS_URL
@@ -11,7 +12,7 @@ const webSocketUrl = () => {
   return `${protocol}//${window.location.host}/ws`
 }
 
-type ConnectionStatus = 'connecting' | 'password' | 'online' | 'offline'
+type ConnectionStatus = 'connecting' | 'password' | 'online' | 'offline' | 'replaced'
 
 export function useOnlineLobby() {
   const socketRef = useRef<WebSocket | null>(null)
@@ -45,6 +46,7 @@ export function useOnlineLobby() {
 
   useEffect(() => {
     let disposed = false
+    let replacedByAnotherTab = false
     let reconnectDelay = 500
     const applyDeferredStateWithoutAnimation = () => {
       if (document.visibilityState !== 'hidden') return
@@ -58,17 +60,17 @@ export function useOnlineLobby() {
       }
     }
     document.addEventListener('visibilitychange', applyDeferredStateWithoutAnimation)
-    // Старые версии хранили один токен на весь браузер. Из-за этого две вкладки
-    // управляли одним игроком. Переносим старый токен в текущую вкладку один раз,
-    // после чего каждая новая вкладка будет получать уже собственную сессию.
-    const legacyToken = window.localStorage.getItem(sessionStorageKey)
-    if (!window.sessionStorage.getItem(sessionStorageKey) && legacyToken) {
-      window.sessionStorage.setItem(sessionStorageKey, legacyToken)
+    // sessionStorage сохраняет владельца текущей вкладки, а localStorage позволяет
+    // вернуть того же игрока после закрытия вкладки или восстановления Chrome.
+    const durableToken = window.localStorage.getItem(persistentSessionStorageKey)
+      ?? window.localStorage.getItem(sessionStorageKey)
+    if (!window.sessionStorage.getItem(sessionStorageKey) && durableToken) {
+      window.sessionStorage.setItem(sessionStorageKey, durableToken)
     }
     window.localStorage.removeItem(sessionStorageKey)
 
     const connect = () => {
-      if (disposed) return
+      if (disposed || replacedByAnotherTab) return
       setStatus((current) => current === 'password' ? current : 'connecting')
       const socket = new WebSocket(webSocketUrl())
       socketRef.current = socket
@@ -76,6 +78,7 @@ export function useOnlineLobby() {
       socket.addEventListener('open', () => {
         reconnectDelay = 500
         const token = window.sessionStorage.getItem(sessionStorageKey)
+          ?? window.localStorage.getItem(persistentSessionStorageKey)
         if (token) {
           passwordScreenRef.current = false
           socket.send(JSON.stringify({ type: 'auth', token }))
@@ -94,6 +97,7 @@ export function useOnlineLobby() {
         if (message.type === 'auth_ok') {
           passwordScreenRef.current = false
           window.sessionStorage.setItem(sessionStorageKey, message.token)
+          window.localStorage.setItem(persistentSessionStorageKey, message.token)
           passwordRef.current = ''
           setError('')
           setStatus('online')
@@ -102,6 +106,7 @@ export function useOnlineLobby() {
         if (message.type === 'auth_error') {
           passwordScreenRef.current = true
           window.sessionStorage.removeItem(sessionStorageKey)
+          window.localStorage.removeItem(persistentSessionStorageKey)
           setError(message.message)
           setStatus('password')
           return
@@ -258,10 +263,10 @@ export function useOnlineLobby() {
         deferredGameStateRef.current = null
         setGameEvents([])
         if (event.code === 4002) {
-          window.sessionStorage.removeItem(sessionStorageKey)
-          sessionEstablishedRef.current = false
-          playerIdRef.current = null
-          setSession(null)
+          replacedByAnotherTab = true
+          setError('Эта игровая сессия открыта в другой вкладке')
+          setStatus('replaced')
+          return
         }
         setStatus(passwordScreenRef.current ? 'password' : sessionEstablishedRef.current ? 'offline' : 'connecting')
         reconnectTimerRef.current = window.setTimeout(connect, reconnectDelay)

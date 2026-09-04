@@ -11,7 +11,7 @@ node_modules
 dist
 dist-ssr
 *.local
-data/*.sqlite*
+/data/
 .env
 
 # Local screenshots, recordings and Codex work artifacts
@@ -30,6 +30,7 @@ data/*.sqlite*
 /ПЛАН_*.md
 /ОТЧЕТ_*.md
 /ОТЧЁТ_*.md
+/game-log*.jsonl
 /REPORT_*.md
 
 # Editor directories and files

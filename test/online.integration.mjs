@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,10 +6,12 @@ import { once } from 'node:events'
 import { DatabaseSync } from 'node:sqlite'
 import assert from 'node:assert/strict'
 import WebSocket from 'ws'
+import { createAuditLog } from '../server/audit-log.mjs'
 
 const port = 3100 + Math.floor(Math.random() * 500)
 const expectedVersion = JSON.parse(readFileSync('package.json', 'utf8')).version
 const dataDirectory = mkdtempSync(join(tmpdir(), 'monopoly-online-'))
+const auditTestDirectory = mkdtempSync(join(tmpdir(), 'monopoly-audit-'))
 const server = spawn(process.execPath, ['server/index.mjs'], {
   cwd: process.cwd(),
   env: {
@@ -78,6 +80,18 @@ const connect = async (auth) => {
 const send = (client, message) => client.socket.send(JSON.stringify(message))
 
 try {
+  const auditTest = createAuditLog({ directory: auditTestDirectory })
+  auditTest.write('redaction_test', {
+    gameId: 'test-game',
+    playerId: 'test-player',
+    token: 'must-not-be-written',
+    nested: { password: 'also-secret' },
+  })
+  const redactedAudit = readFileSync(auditTest.logPath, 'utf8')
+  assert.ok(!redactedAudit.includes('must-not-be-written'), 'Журнал не должен сохранять токены')
+  assert.ok(!redactedAudit.includes('also-secret'), 'Журнал не должен сохранять пароли')
+  assert.ok(redactedAudit.includes('[redacted]'), 'Секретные значения должны заменяться маркером')
+
   await waitForServer
   const versionResponse = await fetch(`http://127.0.0.1:${port}/api/version`)
   assert.equal(versionResponse.status, 200, 'Сервер должен отдавать версию приложения')
@@ -229,9 +243,34 @@ try {
   send(second, { type: 'chat_message', text: 'Привет' })
   const chatSnapshot = await waitFor(first.socket, (message) => message.type === 'game_state' && message.state.logs?.some((entry) => entry.kind === 'chat'))
   assert.equal(chatSnapshot.state.players[0].money, 15000, 'Неактивный игрок не должен перезаписывать состояние')
+  const auditRecords = readFileSync(join(dataDirectory, 'audit', 'game-actions.jsonl'), 'utf8')
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+  const snapshotAudit = auditRecords.find((record) =>
+    record.action === 'snapshot' && record.gameId === playing.lobby.gameId && record.before && record.after)
+  assert.ok(snapshotAudit?.recordId, 'Сервер должен сохранять структурированную запись изменения состояния')
+  assert.equal(snapshotAudit.roomId, 1, 'Запись должна содержать комнату')
+  assert.equal(typeof snapshotAudit.turnSequence, 'number', 'Запись должна содержать номер хода')
+  assert.equal(typeof snapshotAudit.phase, 'string', 'Запись должна содержать фазу')
+  const exportedAudit = spawnSync(process.execPath, ['server/export-game-log.mjs', playing.lobby.gameId], {
+    cwd: process.cwd(),
+    env: { ...process.env, DATA_DIR: dataDirectory },
+    encoding: 'utf8',
+  })
+  assert.equal(exportedAudit.status, 0, 'Выгрузка журнала партии должна завершаться успешно')
+  assert.ok(exportedAudit.stdout.includes(playing.lobby.gameId), 'Выгрузка должна содержать только записи партии')
   second.socket.close()
-  await new Promise((resolve) => setTimeout(resolve, 100))
+  const reconnectingLobby = await waitFor(first.socket, (message) =>
+    message.type === 'lobby' && message.lobby.status === 'playing' &&
+    message.lobby.seats[1]?.playerId === ids[1] && !message.lobby.seats[1].connected)
+  assert.ok(
+    reconnectingLobby.lobby.seats[1].disconnectedExpiresAt > Date.now(),
+    'Во время партии сервер должен сообщать срок переподключения игрока',
+  )
   const reconnected = await connect({ token: second.token })
+  await waitFor(first.socket, (message) =>
+    message.type === 'lobby' && message.lobby.status === 'playing' && message.lobby.seats[1]?.connected)
   const restored = await waitFor(reconnected.socket, (message) => message.type === 'game_state' && message.state.logs?.length)
   send(first, {
     type: 'game_snapshot',
@@ -338,4 +377,5 @@ try {
   server.kill()
   if (server.exitCode === null) await once(server, 'exit')
   rmSync(dataDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  rmSync(auditTestDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 }

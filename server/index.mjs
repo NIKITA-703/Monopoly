@@ -5,6 +5,7 @@ import { extname, join, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { WebSocket, WebSocketServer } from 'ws'
+import { createAuditLog } from './audit-log.mjs'
 
 const rootDirectory = fileURLToPath(new URL('..', import.meta.url))
 const dataDirectory = process.env.DATA_DIR ? normalize(process.env.DATA_DIR) : join(rootDirectory, 'data')
@@ -81,6 +82,13 @@ const auctionDecisionDuration = Math.max(1, Number(process.env.AUCTION_SECONDS ?
 const turnActionDuration = Math.max(10, Number(process.env.TURN_ACTION_SECONDS ?? 30)) * 1000
 const lobbyDisconnectDuration = Math.max(1, Number(process.env.LOBBY_DISCONNECT_SECONDS ?? 600)) * 1000
 const lobbyIdleDuration = Math.max(1, Number(process.env.LOBBY_IDLE_SECONDS ?? 900)) * 1000
+const auditLog = createAuditLog({
+  directory: dataDirectory,
+  debug: debugOnline,
+  maxBytes: Number(process.env.AUDIT_LOG_MAX_BYTES ?? 5 * 1024 * 1024),
+  maxFiles: Number(process.env.AUDIT_LOG_FILES ?? 5),
+  maxAgeDays: Number(process.env.AUDIT_LOG_MAX_AGE_DAYS ?? 14),
+})
 
 if (!process.env.GAME_PASSWORD) {
   console.warn('GAME_PASSWORD не задан. Для локальной разработки используется пароль: monopoly')
@@ -108,10 +116,6 @@ const tileNames = [
   'Bentley', 'Fanvue', 'Fansly', 'Apple TV+', 'OnlyFans', 'Полиция', 'Instagram', 'Reddit',
   'Вопросик', 'TikTok', 'Rolls-Royce', 'Алмазик', 'NASA', 'Вопросик', 'SpaceX',
 ]
-const trace = (event, details = {}) => {
-  if (debugOnline) console.log(JSON.stringify({ time: new Date().toISOString(), event, ...details }))
-}
-
 const roomRow = () => database.prepare('SELECT * FROM room WHERE id = 1').get()
 const sessionRows = () => database.prepare(`
   SELECT token, nickname, seat, ready, connected, last_seen
@@ -181,6 +185,53 @@ const getTurnActorId = (state) => {
 const timeoutCountsAsMissedTurn = (state) => {
   const activePlayerId = state?.players?.[state.activePlayerIndex]?.id ?? null
   return Boolean(activePlayerId && !state?.auction && !state?.tradeDraft && getTurnActorId(state) === activePlayerId)
+}
+
+const summarizeGameState = (state) => {
+  if (!state || !Array.isArray(state.players)) return null
+  return {
+    turnSequence: state.turnSequence ?? 0,
+    phase: state.pendingPayment ? 'payment'
+      : state.pendingTileId !== null && state.pendingTileId !== undefined ? 'purchase'
+        : state.auction ? 'auction'
+          : state.casino ? 'casino'
+            : state.tradeDraft ? `trade:${state.tradeDraft.stage}`
+              : 'roll',
+    actorId: getTurnActorId(state),
+    players: state.players.map((player) => ({
+      id: player.id,
+      name: player.name,
+      money: player.money,
+      position: player.position,
+      eliminated: state.eliminatedPlayerIds?.includes(player.id) ?? false,
+    })),
+    owners: Object.keys(state.owners ?? {}).length,
+    pendingTileId: state.pendingTileId ?? null,
+    pendingPayment: state.pendingPayment
+      ? {
+          kind: state.pendingPayment.kind,
+          payerId: state.pendingPayment.payerId,
+          recipientId: state.pendingPayment.recipientId ?? null,
+          amount: state.pendingPayment.amount,
+        }
+      : null,
+    winnerId: state.winnerId ?? null,
+  }
+}
+
+const trace = (action, details = {}) => {
+  const storedGame = details.gameId
+    ? database.prepare('SELECT state_json FROM games WHERE id = ?').get(details.gameId)
+    : null
+  const storedState = storedGame?.state_json ? JSON.parse(storedGame.state_json) : null
+  const summary = summarizeGameState(storedState)
+  return auditLog.write(action, {
+    roomId: 1,
+    playerId: details.playerId ?? details.senderId ?? details.actorId ?? null,
+    turnSequence: details.turnSequence ?? summary?.turnSequence ?? null,
+    phase: details.phase ?? summary?.phase ?? null,
+    ...details,
+  })
 }
 
 const recordLanding = (gameId, state, event) => {
@@ -310,6 +361,10 @@ const beginGame = () => {
   `).run(gameId)
   database.prepare('UPDATE sessions SET ready = 0 WHERE seat IS NOT NULL').run()
   countdownTimer = null
+  trace('game_started', {
+    gameId,
+    playerIds: participants.map((participant) => publicPlayerId(participant.token)),
+  })
   broadcastLobby()
 }
 
@@ -494,7 +549,7 @@ const handleLobbyMessage = (socket, token, message) => {
     const payload = { type: 'game_event', gameId: room.game_id, eventId: randomUUID(), senderId, event }
     if (validMovement || validDirectMovement) recordLanding(room.game_id, state, event)
     for (const client of clients.keys()) send(client, payload)
-    trace('game_event', { gameId: room.game_id, senderId, kind: event.kind })
+    trace('game_event', { gameId: room.game_id, eventId: payload.eventId, senderId, kind: event.kind })
     return
   }
 
@@ -511,8 +566,10 @@ const handleLobbyMessage = (socket, token, message) => {
       returnGameToLobby(room.game_id, `hidden_restart:${senderId}`)
       return
     }
+    const chatEventId = randomUUID()
+    const previousState = summarizeGameState(state)
     state.logs = [...(state.logs ?? []), {
-      id: randomUUID(),
+      id: chatEventId,
       playerId: senderId,
       text: `${player.name}: ${text}`,
       kind: 'chat',
@@ -522,6 +579,13 @@ const handleLobbyMessage = (socket, token, message) => {
     database.prepare('UPDATE games SET state_json = ?, updated_at = ? WHERE id = ?')
       .run(JSON.stringify(state), revision, room.game_id)
     broadcastGameState(room.game_id, state, revision, game.turn_deadline, 'server')
+    trace('chat_message', {
+      gameId: room.game_id,
+      eventId: chatEventId,
+      playerId: senderId,
+      before: previousState,
+      after: summarizeGameState(state),
+    })
     return
   }
 
@@ -645,7 +709,14 @@ const handleLobbyMessage = (socket, token, message) => {
     database.prepare('UPDATE games SET state_json = ?, updated_at = ?, turn_key = ?, turn_deadline = ? WHERE id = ?')
       .run(JSON.stringify(state), revision, turnKey, turnDeadline, room.game_id)
     broadcastGameState(room.game_id, state, revision, turnDeadline, senderId)
-    trace('snapshot', { gameId: room.game_id, revision, senderId, turnKey })
+    trace('snapshot', {
+      gameId: room.game_id,
+      revision,
+      playerId: senderId,
+      turnKey,
+      before: summarizeGameState(storedState),
+      after: summarizeGameState(state),
+    })
     if (state.winnerId) scheduleGameReturnToLobby(room.game_id)
     return
   }

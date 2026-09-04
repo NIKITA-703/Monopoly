@@ -293,6 +293,39 @@
 }
 .online-connection.connected { color: #67e2c8; }
 
+.game-reconnect-notices {
+  position: fixed;
+  z-index: 9999;
+  top: 38px;
+  right: 12px;
+  display: grid;
+  width: min(300px, calc(100vw - 24px));
+  gap: 7px;
+  pointer-events: none;
+}
+
+.game-reconnect-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 181, 94, 0.42);
+  border-radius: 9px;
+  color: #e9f0f7;
+  background: rgba(8, 14, 21, 0.94);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+}
+
+.game-reconnect-notice .connection-spinner {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.game-reconnect-notice div { display: grid; gap: 2px; }
+.game-reconnect-notice strong { color: #ffca86; font-size: 12px; }
+.game-reconnect-notice small { color: #91a1b3; font-size: 11px; }
+
 @media (max-width: 900px) {
   .lobby-seats { grid-template-columns: repeat(2, 1fr); }
   .lobby-controls { grid-template-columns: 1fr; }

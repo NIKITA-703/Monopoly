@@ -22,6 +22,12 @@ const lobbyPlayers = (seats: LobbySeat[]): Player[] =>
       lastDelta: 0,
     }))
 
+const formatCountdown = (expiresAt: number, now: number) => {
+  const seconds = Math.max(0, Math.ceil((expiresAt - now) / 1000))
+  const minutes = Math.floor(seconds / 60)
+  return `${String(minutes).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+}
+
 function VersionStatus({ serverVersion }: { serverVersion: string | null }) {
   const versionsDiffer = Boolean(serverVersion && serverVersion !== clientVersion)
 
@@ -112,6 +118,22 @@ export default function OnlineGate() {
     if (password.trim()) online.authenticate(password)
   }
 
+  if (online.status === 'replaced') {
+    return (
+      <main className="online-screen">
+        <section className="connection-card">
+          <span className="access-kicker">Сессия перенесена</span>
+          <h1>Игра открыта в другой вкладке</h1>
+          <p>Управление игроком передано последней открытой вкладке.</p>
+          <button type="button" onClick={() => window.location.reload()}>
+            Вернуть управление сюда
+          </button>
+        </section>
+        <VersionStatus serverVersion={serverVersion} />
+      </main>
+    )
+  }
+
   if (online.status === 'password') {
     return (
       <main className="online-screen">
@@ -149,11 +171,30 @@ export default function OnlineGate() {
   }
 
   if (online.lobby.status === 'playing') {
+    const reconnectingSeats = online.lobby.seats.filter((seat) =>
+      seat.nickname && !seat.connected && seat.disconnectedExpiresAt,
+    )
+
     return (
       <div className="online-game">
         <span className={`online-connection ${online.status === 'online' ? 'connected' : ''}`}>
           {online.status === 'online' ? 'Онлайн' : 'Переподключение…'}
         </span>
+        {reconnectingSeats.length > 0 ? (
+          <aside className="game-reconnect-notices" aria-live="polite">
+            {reconnectingSeats.map((seat) => (
+              <div className="game-reconnect-notice" key={seat.playerId ?? seat.seat}>
+                <span className="connection-spinner" aria-hidden="true" />
+                <div>
+                  <strong>{seat.nickname} переподключается</strong>
+                  <small>
+                    Ожидание: {formatCountdown(seat.disconnectedExpiresAt ?? now, now)}
+                  </small>
+                </div>
+              </div>
+            ))}
+          </aside>
+        ) : null}
         <App
           key={online.lobby.gameId ?? 'online-game'}
           initialGamePlayers={players}
@@ -195,12 +236,6 @@ export default function OnlineGate() {
     return true
   }
 
-  const formatDisconnectTime = (expiresAt: number) => {
-    const seconds = Math.max(0, Math.ceil((expiresAt - now) / 1000))
-    const minutes = Math.floor(seconds / 60)
-    return `${String(minutes).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
-  }
-
   return (
     <main className="online-screen lobby-screen">
       <section className="lobby-card">
@@ -229,10 +264,10 @@ export default function OnlineGate() {
                       <span className={seat.connected && (!seat.idleExpiresAt || seat.idleExpiresAt - now > 60000) ? 'connected' : 'disconnected'}>
                         {seat.connected
                           ? seat.idleExpiresAt && seat.idleExpiresAt - now <= 60000
-                            ? `Неактивен: ${formatDisconnectTime(seat.idleExpiresAt)}`
+                            ? `Неактивен: ${formatCountdown(seat.idleExpiresAt, now)}`
                             : seat.ready ? 'Готов' : 'В лобби'
                           : seat.disconnectedExpiresAt
-                            ? `Освободится через ${formatDisconnectTime(seat.disconnectedExpiresAt)}`
+                            ? `Освободится через ${formatCountdown(seat.disconnectedExpiresAt, now)}`
                             : 'Переподключается'}
                       </span>
                     </div>
@@ -250,7 +285,7 @@ export default function OnlineGate() {
           <section className="lobby-idle-warning" role="alert">
             <div>
               <strong>Вы давно неактивны</strong>
-              <span>Место освободится через {formatDisconnectTime(ownLobbySeat?.idleExpiresAt ?? now)}</span>
+              <span>Место освободится через {formatCountdown(ownLobbySeat?.idleExpiresAt ?? now, now)}</span>
             </div>
             <button type="button" onClick={reportLobbyActivity}>Я здесь</button>
           </section>
