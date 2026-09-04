@@ -172,7 +172,7 @@ try {
   const state = {
     players: ids.map((id, index) => ({ id, name: `P${index + 1}`, money: 15000, position: 0, color: '#fff', avatar: 'P' })),
     activePlayerIndex: 0, turnSequence: 0, pendingTileId: null, pendingPayment: null,
-    auction: null, casino: null, tradeDraft: null, owners: {}, propertyLevels: {},
+    auction: null, casino: null, tradeDraft: null, owners: { 3: ids[0], 13: ids[1] }, propertyLevels: {},
     mortgagedPropertyIds: [], mortgageExpiryTurns: {}, logs: [], lastRoll: null,
     eventPaymentQueue: [], hasExtraRoll: false, jailedPlayerIds: [], jailFailedAttempts: {},
     casinoJackpot: 2000, upgradedGroupsThisTurn: [], playerEffects: {}, lapCounts: {}, tradeRequestsThisTurn: 0,
@@ -314,8 +314,8 @@ try {
     state: {
       ...restored.state,
       tradeDraft: {
-        targetPlayerId: ids[1], offeredMoney: 0, requestedMoney: 0,
-        offeredTileIds: [], requestedTileIds: [], stage: 'draft',
+        targetPlayerId: ids[1], offeredMoney: 100, requestedMoney: 500,
+        offeredTileIds: [3], requestedTileIds: [13], stage: 'draft',
       },
     },
   })
@@ -326,8 +326,8 @@ try {
     state: {
       ...tradeDraft.state,
       tradeDraft: {
-        targetPlayerId: ids[1], offeredMoney: 0, requestedMoney: 0,
-        offeredTileIds: [], requestedTileIds: [], stage: 'review',
+        targetPlayerId: ids[1], offeredMoney: 100, requestedMoney: 500,
+        offeredTileIds: [3], requestedTileIds: [13], stage: 'review',
       },
     },
   })
@@ -341,19 +341,47 @@ try {
       ...tradeReview.state,
       players: tradeReview.state.players.map((player) =>
         player.id === ids[1] ? { ...player, money: 900, lastDelta: 300 } : player),
-      owners: { ...tradeReview.state.owners, 13: ids[1] },
-      propertyLevels: { ...tradeReview.state.propertyLevels, 13: 2 },
+      owners: { ...tradeReview.state.owners, 13: ids[0] },
       tradeDraft: null,
-      eliminatedPlayerIds: [ids[1]],
-      winnerId: ids[0],
+    },
+  })
+  await waitFor(reconnected.socket, (message) =>
+    message.type === 'action_error' && message.message.includes('некорректный обмен'))
+  send(reconnected, {
+    type: 'game_snapshot',
+    state: {
+      ...tradeReview.state,
+      players: tradeReview.state.players.map((player) =>
+        player.id === ids[0]
+          ? { ...player, money: player.money + 400, lastDelta: 400 }
+          : player.id === ids[1]
+            ? { ...player, money: player.money - 400, lastDelta: -400 }
+            : player),
+      owners: { ...tradeReview.state.owners, 3: ids[1], 13: ids[0] },
+      tradeDraft: null,
+    },
+  })
+  const acceptedTrade = await waitFor(first.socket, (message) =>
+    message.type === 'game_state' && message.revision > tradeReview.revision && message.state.tradeDraft === null)
+  assert.equal(acceptedTrade.state.owners[3], ids[1], 'Сервер должен принять корректную передачу предложенного поля')
+  assert.equal(acceptedTrade.state.owners[13], ids[0], 'Сервер должен принять корректную передачу запрошенного поля')
+  send(first, {
+    type: 'game_snapshot',
+    state: {
+      ...acceptedTrade.state,
+      players: acceptedTrade.state.players.map((player) =>
+        player.id === ids[0] ? { ...player, money: 0, lastDelta: 0 } : player),
+      activePlayerIndex: 1,
+      turnSequence: acceptedTrade.state.turnSequence + 1,
+      eliminatedPlayerIds: [ids[0]],
+      winnerId: ids[1],
     },
   })
   const eliminatedSnapshot = await waitFor(first.socket, (message) =>
-    message.type === 'game_state' && message.state.eliminatedPlayerIds?.includes(ids[1]))
-  const eliminatedPlayer = eliminatedSnapshot.state.players.find((player) => player.id === ids[1])
+    message.type === 'game_state' && message.state.eliminatedPlayerIds?.includes(ids[0]))
+  const eliminatedPlayer = eliminatedSnapshot.state.players.find((player) => player.id === ids[0])
   assert.equal(eliminatedPlayer.money, 0, 'Баланс выбывшего игрока должен быть обнулён сервером')
   assert.equal(eliminatedPlayer.lastDelta, 0, 'Последнее изменение баланса выбывшего должно быть обнулено')
-  assert.equal(eliminatedSnapshot.state.owners[13], undefined, 'Поля выбывшего должны вернуться Банку')
   assert.equal(eliminatedSnapshot.state.winnerId, null, 'Клиент не должен самостоятельно назначать победителя')
 
   queues.set(first.socket, queues.get(first.socket).filter((message) =>

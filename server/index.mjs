@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { WebSocket, WebSocketServer } from 'ws'
 import { createAuditLog } from './audit-log.mjs'
-import { validateGameState } from './game-state-validation.mjs'
+import { validateGameState, validateTradeResolution } from './game-state-validation.mjs'
 
 const rootDirectory = fileURLToPath(new URL('..', import.meta.url))
 const dataDirectory = process.env.DATA_DIR ? normalize(process.env.DATA_DIR) : join(rootDirectory, 'data')
@@ -689,6 +689,18 @@ const handleLobbyMessage = (socket, token, message) => {
         senderId,
         expectedActorId: previousActorId,
       })
+      return
+    }
+    const tradeResolutionError = storedState
+      ? validateTradeResolution(storedState, state, senderId)
+      : null
+    if (tradeResolutionError) {
+      trace('snapshot_rejected', {
+        gameId: room.game_id,
+        senderId,
+        reason: tradeResolutionError,
+      })
+      send(socket, { type: 'action_error', message: 'Сервер отклонил некорректный обмен' })
       return
     }
 
