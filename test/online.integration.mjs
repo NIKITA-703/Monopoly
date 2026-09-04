@@ -262,6 +262,21 @@ try {
     state: { ...state, players: state.players.map((player, index) => index === 0 ? { ...player, money: 1 } : player) },
   })
   await new Promise((resolve) => setTimeout(resolve, 50))
+  const duplicateRequestId = 'integration-duplicate-chat'
+  send(second, { type: 'chat_message', text: 'Проверка повтора', requestId: duplicateRequestId })
+  send(second, { type: 'chat_message', text: 'Проверка повтора', requestId: duplicateRequestId })
+  await waitFor(first.socket, (message) =>
+    message.type === 'game_state' && message.state.logs?.some((entry) => entry.text.includes('Проверка повтора')))
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  const idempotencyDatabase = new DatabaseSync(join(dataDirectory, 'monopoly.sqlite'), { readOnly: true })
+  const idempotentState = JSON.parse(idempotencyDatabase.prepare('SELECT state_json FROM games WHERE id = ?')
+    .get(playing.lobby.gameId).state_json)
+  idempotencyDatabase.close()
+  assert.equal(
+    idempotentState.logs.filter((entry) => entry.text.includes('Проверка повтора')).length,
+    1,
+    'Повторная отправка одного запроса не должна выполнять его второй раз',
+  )
   send(second, { type: 'chat_message', text: 'Привет' })
   const chatSnapshot = await waitFor(first.socket, (message) => message.type === 'game_state' && message.state.logs?.some((entry) => entry.kind === 'chat'))
   assert.equal(chatSnapshot.state.players[0].money, 15000, 'Неактивный игрок не должен перезаписывать состояние')

@@ -4,6 +4,10 @@ import { playGameSound } from '../audio/gameAudio'
 
 const sessionStorageKey = 'monopoly.online.session'
 const persistentSessionStorageKey = 'monopoly.online.player-session'
+const repeatProtectedMessageTypes = new Set([
+  'claim_seat', 'leave_seat', 'set_nickname', 'set_ready', 'turn_action_started',
+  'game_event', 'chat_message', 'game_snapshot', 'return_to_lobby',
+])
 type GameStateMessage = Extract<ServerMessage, { type: 'game_state' }>
 const webSocketUrl = () => {
   const configuredUrl = import.meta.env.VITE_WS_URL
@@ -29,6 +33,7 @@ export function useOnlineLobby() {
   const lastImmediateTurnSoundRef = useRef<string | null>(null)
   const lastImmediateTradeSoundRef = useRef<string | null>(null)
   const lastImmediateAuctionSoundRef = useRef<string | null>(null)
+  const recentRequestsRef = useRef(new Map<string, { requestId: string; sentAt: number }>())
   const [status, setStatus] = useState<ConnectionStatus>('connecting')
   const [lobby, setLobby] = useState<LobbyState | null>(null)
   const [session, setSession] = useState<OnlineSession | null>(null)
@@ -40,7 +45,26 @@ export function useOnlineLobby() {
 
   const send = useCallback((message: Record<string, unknown>) => {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify(message))
+      const now = Date.now()
+      const messageType = typeof message.type === 'string' ? message.type : ''
+      const repeatKey = repeatProtectedMessageTypes.has(messageType) ? JSON.stringify(message) : ''
+      const recentRequest = repeatKey ? recentRequestsRef.current.get(repeatKey) : null
+      const requestId = typeof message.requestId === 'string'
+        ? message.requestId
+        : recentRequest && now - recentRequest.sentAt < 750
+          ? recentRequest.requestId
+          : crypto.randomUUID()
+      if (repeatKey) {
+        recentRequestsRef.current.set(repeatKey, { requestId, sentAt: now })
+        if (recentRequestsRef.current.size > 100) {
+          const oldestKey = recentRequestsRef.current.keys().next().value
+          if (oldestKey) recentRequestsRef.current.delete(oldestKey)
+        }
+      }
+      socketRef.current.send(JSON.stringify({
+        ...message,
+        requestId,
+      }))
     }
   }, [])
 

@@ -58,6 +58,15 @@ database.exec(`
   );
   CREATE INDEX IF NOT EXISTS landings_game_id_idx ON landings (game_id);
   CREATE INDEX IF NOT EXISTS landings_tile_id_idx ON landings (tile_id);
+
+  CREATE TABLE IF NOT EXISTS processed_requests (
+    session_token TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (session_token, request_id)
+  );
+  CREATE INDEX IF NOT EXISTS processed_requests_created_at_idx ON processed_requests (created_at);
 `)
 try { database.exec('ALTER TABLE games ADD COLUMN turn_key TEXT') } catch {}
 try { database.exec('ALTER TABLE games ADD COLUMN turn_deadline INTEGER') } catch {}
@@ -78,6 +87,17 @@ let countdownTimer = null
 const timeoutControllers = new Map()
 const gameReturnTimers = new Map()
 const turnActionControllers = new Map()
+const idempotentMessageTypes = new Set([
+  'claim_seat',
+  'leave_seat',
+  'set_nickname',
+  'set_ready',
+  'turn_action_started',
+  'game_event',
+  'chat_message',
+  'game_snapshot',
+  'return_to_lobby',
+])
 const turnDuration = Math.max(5, Number(process.env.TURN_SECONDS ?? 70)) * 1000
 const tradeDecisionDuration = Math.max(5, Number(process.env.TRADE_SECONDS ?? 35)) * 1000
 const auctionDecisionDuration = Math.max(1, Number(process.env.AUCTION_SECONDS ?? 40)) * 1000
@@ -108,6 +128,19 @@ const mimeTypes = {
 
 const send = (socket, message) => {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
+}
+
+const claimRequest = (token, message) => {
+  if (!idempotentMessageTypes.has(message.type)) return { accepted: true, requestId: null }
+  if (message.requestId == null) return { accepted: true, requestId: null }
+  if (typeof message.requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(message.requestId)) {
+    return { accepted: false, requestId: null, invalid: true }
+  }
+  const result = database.prepare(`
+    INSERT OR IGNORE INTO processed_requests (session_token, request_id, message_type, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run(token, message.requestId, message.type, Date.now())
+  return { accepted: result.changes === 1, requestId: message.requestId, invalid: false }
 }
 
 const publicPlayerId = (token) => createHash('sha256').update(token).digest('hex').slice(0, 16)
@@ -888,6 +921,20 @@ webSocketServer.on('connection', (socket, request) => {
     }
 
     database.prepare('UPDATE sessions SET last_seen = ?, connected = 1 WHERE token = ?').run(Date.now(), token)
+    const request = claimRequest(token, message)
+    if (request.invalid) {
+      send(socket, { type: 'action_error', message: 'Некорректный идентификатор запроса' })
+      return
+    }
+    if (!request.accepted) {
+      trace('duplicate_request_ignored', {
+        gameId: roomRow().game_id ?? null,
+        playerId: publicPlayerId(token),
+        eventId: request.requestId,
+        messageType: message.type,
+      })
+      return
+    }
     handleLobbyMessage(socket, token, message)
   })
 
@@ -942,6 +989,11 @@ setInterval(() => {
   }
   reconcileCountdown()
 }, 1000).unref()
+
+setInterval(() => {
+  database.prepare('DELETE FROM processed_requests WHERE created_at < ?')
+    .run(Date.now() - 24 * 60 * 60 * 1000)
+}, 60 * 60 * 1000).unref()
 
 setInterval(() => {
   const room = roomRow()
