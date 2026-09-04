@@ -1,54 +1,54 @@
 import type { Player, Tile } from './types'
 
-const rocketMap = new URL('../pic/rocket_map.png', import.meta.url).href
-const jackpotMap = new URL('../pic/jackpot_map.png', import.meta.url).href
-const policeMap = new URL('../pic/police_map.png', import.meta.url).href
-const policeMan = new URL('../pic/police_man.png', import.meta.url).href
-const diceChat = new URL('../pic/dice_chat.png', import.meta.url).href
-const buyIcon = new URL('../pic/buy.png', import.meta.url).href
-const moneyIcon = new URL('../pic/money.png', import.meta.url).href
-const chatIcon = new URL('../pic/chat.png', import.meta.url).href
-const thinkingBuyIcon = new URL('../pic/thinking_buy.png', import.meta.url).href
-const tradeIcon = new URL('../pic/trade.png', import.meta.url).href
-const gavelIcon = new URL('../pic/Gavel.png', import.meta.url).href
-const starIcon = new URL('../pic/Star.png', import.meta.url).href
-const allStarIcon = new URL('../pic/AllStar.png', import.meta.url).href
-const lockIcon = new URL('../pic/lock.png', import.meta.url).href
-const jailIcon = new URL('../pic/jail.png', import.meta.url).href
-const jackpotChatIcon = new URL('../pic/Jacpot_chat.png', import.meta.url).href
+const rocketMap = new URL('../pic/rocket_map.webp', import.meta.url).href
+const jackpotMap = new URL('../pic/jackpot_map.webp', import.meta.url).href
+const policeMap = new URL('../pic/police_map.webp', import.meta.url).href
+const policeMan = new URL('../pic/police_man.webp', import.meta.url).href
+const diceChat = new URL('../pic/dice_chat.webp', import.meta.url).href
+const buyIcon = new URL('../pic/buy.webp', import.meta.url).href
+const moneyIcon = new URL('../pic/money.webp', import.meta.url).href
+const chatIcon = new URL('../pic/chat.webp', import.meta.url).href
+const thinkingBuyIcon = new URL('../pic/thinking_buy.webp', import.meta.url).href
+const tradeIcon = new URL('../pic/trade.webp', import.meta.url).href
+const gavelIcon = new URL('../pic/Gavel.webp', import.meta.url).href
+const starIcon = new URL('../pic/Star.webp', import.meta.url).href
+const allStarIcon = new URL('../pic/AllStar.webp', import.meta.url).href
+const lockIcon = new URL('../pic/lock.webp', import.meta.url).href
+const jailIcon = new URL('../pic/jail.webp', import.meta.url).href
+const jackpotChatIcon = new URL('../pic/Jacpot_chat.webp', import.meta.url).href
 
 const logoFiles = {
-  adidas: new URL('../logo/Adidas.png', import.meta.url).href,
-  amazon: new URL('../logo/Amazon.png', import.meta.url).href,
-  appleTv: new URL('../logo/AppleTV.png', import.meta.url).href,
-  balenciaga: new URL('../logo/Balenciaga.png', import.meta.url).href,
-  bentley: new URL('../logo/Bently.png', import.meta.url).href,
-  claude: new URL('../logo/Claude.png', import.meta.url).href,
-  diamond: new URL('../logo/Dimond.png', import.meta.url).href,
-  electronicArts: new URL('../logo/EA.png', import.meta.url).href,
-  epicGames: new URL('../logo/EpicGames.png', import.meta.url).href,
-  fansly: new URL('../logo/Fansly.png', import.meta.url).href,
-  fanvue: new URL('../logo/fanvue.png', import.meta.url).href,
-  google: new URL('../logo/Google.png', import.meta.url).href,
-  chatGpt: new URL('../logo/GPT.png', import.meta.url).href,
-  grok: new URL('../logo/GROK.png', import.meta.url).href,
-  instagram: new URL('../logo/Inst.png', import.meta.url).href,
-  kari: new URL('../logo/Kari.png', import.meta.url).href,
-  louisVuitton: new URL('../logo/Louis Vuitton.png', import.meta.url).href,
-  microsoft: new URL('../logo/Microsoft.png', import.meta.url).href,
-  nasa: new URL('../logo/Nasa.png', import.meta.url).href,
-  netflix: new URL('../logo/Netflix.png', import.meta.url).href,
-  nike: new URL('../logo/Nike.png', import.meta.url).href,
-  onlyFans: new URL('../logo/OnlyFans.png', import.meta.url).href,
-  porsche: new URL('../logo/Porshe.png', import.meta.url).href,
-  reddit: new URL('../logo/reddit.png', import.meta.url).href,
-  rollsRoyce: new URL('../logo/RollsRoyce.png', import.meta.url).href,
-  question: new URL('../logo/QustionMark.png', import.meta.url).href,
-  spaceX: new URL('../logo/spaceX.png', import.meta.url).href,
-  steam: new URL('../logo/Steam.png', import.meta.url).href,
-  tax: new URL('../logo/Tax.png', import.meta.url).href,
-  tesla: new URL('../logo/Tesla.png', import.meta.url).href,
-  tikTok: new URL('../logo/TikTok.png', import.meta.url).href,
+  adidas: new URL('../logo/Adidas.webp', import.meta.url).href,
+  amazon: new URL('../logo/Amazon.webp', import.meta.url).href,
+  appleTv: new URL('../logo/AppleTV.webp', import.meta.url).href,
+  balenciaga: new URL('../logo/Balenciaga.webp', import.meta.url).href,
+  bentley: new URL('../logo/Bently.webp', import.meta.url).href,
+  claude: new URL('../logo/Claude.webp', import.meta.url).href,
+  diamond: new URL('../logo/Dimond.webp', import.meta.url).href,
+  electronicArts: new URL('../logo/EA.webp', import.meta.url).href,
+  epicGames: new URL('../logo/EpicGames.webp', import.meta.url).href,
+  fansly: new URL('../logo/Fansly.webp', import.meta.url).href,
+  fanvue: new URL('../logo/fanvue.webp', import.meta.url).href,
+  google: new URL('../logo/Google.webp', import.meta.url).href,
+  chatGpt: new URL('../logo/GPT.webp', import.meta.url).href,
+  grok: new URL('../logo/GROK.webp', import.meta.url).href,
+  instagram: new URL('../logo/Inst.webp', import.meta.url).href,
+  kari: new URL('../logo/Kari.webp', import.meta.url).href,
+  louisVuitton: new URL('../logo/Louis Vuitton.webp', import.meta.url).href,
+  microsoft: new URL('../logo/Microsoft.webp', import.meta.url).href,
+  nasa: new URL('../logo/Nasa.webp', import.meta.url).href,
+  netflix: new URL('../logo/Netflix.webp', import.meta.url).href,
+  nike: new URL('../logo/Nike.webp', import.meta.url).href,
+  onlyFans: new URL('../logo/OnlyFans.webp', import.meta.url).href,
+  porsche: new URL('../logo/Porshe.webp', import.meta.url).href,
+  reddit: new URL('../logo/reddit.webp', import.meta.url).href,
+  rollsRoyce: new URL('../logo/RollsRoyce.webp', import.meta.url).href,
+  question: new URL('../logo/QustionMark.webp', import.meta.url).href,
+  spaceX: new URL('../logo/spaceX.webp', import.meta.url).href,
+  steam: new URL('../logo/Steam.webp', import.meta.url).href,
+  tax: new URL('../logo/Tax.webp', import.meta.url).href,
+  tesla: new URL('../logo/Tesla.webp', import.meta.url).href,
+  tikTok: new URL('../logo/TikTok.webp', import.meta.url).href,
 } as const
 
 const logo = (file: (typeof logoFiles)[keyof typeof logoFiles]) => file

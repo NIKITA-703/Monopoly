@@ -9,6 +9,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 const rootDirectory = fileURLToPath(new URL('..', import.meta.url))
 const dataDirectory = process.env.DATA_DIR ? normalize(process.env.DATA_DIR) : join(rootDirectory, 'data')
 const distDirectory = join(rootDirectory, 'dist')
+const appVersion = JSON.parse(readFileSync(join(rootDirectory, 'package.json'), 'utf8')).version
 mkdirSync(dataDirectory, { recursive: true })
 
 const database = new DatabaseSync(join(dataDirectory, 'monopoly.sqlite'))
@@ -698,6 +699,15 @@ const handleLobbyMessage = (socket, token, message) => {
 }
 
 const server = createServer(async (request, response) => {
+  if (request.url === '/api/version' && request.method === 'GET') {
+    response.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    })
+    response.end(JSON.stringify({ version: appVersion }))
+    return
+  }
+
   if (request.url === '/api/access' && request.method === 'POST') {
     try {
       const body = await readJsonBody(request)
@@ -726,7 +736,7 @@ const server = createServer(async (request, response) => {
 
   if (request.url === '/api/health') {
     response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-    response.end(JSON.stringify({ ok: true }))
+    response.end(JSON.stringify({ ok: true, version: appVersion }))
     return
   }
 
@@ -878,5 +888,5 @@ setInterval(() => {
 }, 500).unref()
 
 server.listen(port, host, () => {
-  console.log(`Monopoly online server: http://${host}:${port}`)
+  console.log(`Monopoly online server v${appVersion}: http://${host}:${port}`)
 })

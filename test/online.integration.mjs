@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import WebSocket from 'ws'
 
 const port = 3100 + Math.floor(Math.random() * 500)
+const expectedVersion = JSON.parse(readFileSync('package.json', 'utf8')).version
 const dataDirectory = mkdtempSync(join(tmpdir(), 'monopoly-online-'))
 const server = spawn(process.execPath, ['server/index.mjs'], {
   cwd: process.cwd(),
@@ -78,6 +79,14 @@ const send = (client, message) => client.socket.send(JSON.stringify(message))
 
 try {
   await waitForServer
+  const versionResponse = await fetch(`http://127.0.0.1:${port}/api/version`)
+  assert.equal(versionResponse.status, 200, 'Сервер должен отдавать версию приложения')
+  assert.equal(
+    (await versionResponse.json()).version,
+    expectedVersion,
+    'Версии package.json и сервера должны совпадать',
+  )
+
   const accessResponse = await fetch(`http://127.0.0.1:${port}/api/access`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

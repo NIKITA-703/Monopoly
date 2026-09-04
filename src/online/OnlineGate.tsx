@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from
 import App, { type OnlineGameState } from '../App'
 import { unlockGameAudio } from '../audio/gameAudio'
 import type { Player } from '../types'
+import { clientVersion } from '../version'
 import './online.css'
 import type { LobbySeat } from './types'
 import { useOnlineLobby } from './useOnlineLobby'
@@ -21,12 +22,43 @@ const lobbyPlayers = (seats: LobbySeat[]): Player[] =>
       lastDelta: 0,
     }))
 
+function VersionStatus({ serverVersion }: { serverVersion: string | null }) {
+  const versionsDiffer = Boolean(serverVersion && serverVersion !== clientVersion)
+
+  return (
+    <aside className={`version-status ${versionsDiffer ? 'mismatch' : ''}`} aria-live="polite">
+      <span>Monopoly v{clientVersion}</span>
+      {serverVersion ? <small>Сервер v{serverVersion}</small> : <small>Версия сервера недоступна</small>}
+      {versionsDiffer ? (
+        <button type="button" onClick={() => window.location.reload()}>
+          Обновить страницу
+        </button>
+      ) : null}
+    </aside>
+  )
+}
+
 export default function OnlineGate() {
   const online = useOnlineLobby()
   const { reportLobbyActivity } = online
   const [password, setPassword] = useState('')
   const [nicknameError, setNicknameError] = useState('')
   const [now, setNow] = useState(() => Date.now())
+  const [serverVersion, setServerVersion] = useState<string | null>(null)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch('/api/version', { cache: 'no-store', signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Version request failed: ${response.status}`)
+        return response.json() as Promise<{ version?: string }>
+      })
+      .then((result) => setServerVersion(result.version ?? null))
+      .catch((error: unknown) => {
+        if (!(error instanceof DOMException && error.name === 'AbortError')) setServerVersion(null)
+      })
+    return () => controller.abort()
+  }, [])
 
   useEffect(() => {
     const unlockAudio = () => unlockGameAudio()
@@ -98,6 +130,7 @@ export default function OnlineGate() {
           {online.error ? <span className="online-error">{online.error}</span> : null}
           <button type="submit">Войти</button>
         </form>
+        <VersionStatus serverVersion={serverVersion} />
       </main>
     )
   }
@@ -110,6 +143,7 @@ export default function OnlineGate() {
           <h1>{online.status === 'offline' ? 'Возвращаемся в игру…' : 'Подключаемся…'}</h1>
           <p>Сессия восстановится автоматически.</p>
         </section>
+        <VersionStatus serverVersion={serverVersion} />
       </main>
     )
   }
@@ -267,6 +301,7 @@ export default function OnlineGate() {
           <footer className="lobby-footer">Игра начнётся, когда все занявшие место игроки нажмут «Я готов».</footer>
         )}
       </section>
+      <VersionStatus serverVersion={serverVersion} />
     </main>
   )
 }

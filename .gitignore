@@ -26,6 +26,7 @@ data/*.sqlite*
 # Local planning and review notes
 /задачи.txt
 /css.txt
+/html.txt
 /ПЛАН_*.md
 /ОТЧЕТ_*.md
 /ОТЧЁТ_*.md

@@ -84,6 +84,39 @@
   font-weight: 700;
 }
 
+.version-status {
+  position: fixed;
+  z-index: 20;
+  right: 18px;
+  bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #718196;
+  font-size: 11px;
+}
+
+.version-status small { color: #607084; }
+.version-status.mismatch {
+  padding: 9px 11px;
+  border: 1px solid rgba(255, 181, 94, 0.42);
+  border-radius: 9px;
+  color: #ffd095;
+  background: rgba(31, 23, 13, 0.96);
+}
+.version-status.mismatch small { color: #ffb968; }
+.version-status button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  color: #151006;
+  background: #ffbd69;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
 .connection-card {
   justify-items: center;
   text-align: center;
