@@ -388,6 +388,10 @@ export function useOnlineLobby() {
     beginTurnAction: () => send({ type: 'turn_action_started' }),
     sendChatMessage: (text: string) => send({ type: 'chat_message', text }),
     returnToLobby: () => send({ type: 'return_to_lobby' }),
-    sendGameEvent: (event: OnlineGameEvent) => send({ type: 'game_event', event }),
+    sendGameEvent: (event: OnlineGameEvent) => send({
+      type: 'game_event',
+      event,
+      ...(pendingTimeoutIdRef.current ? { timeoutId: pendingTimeoutIdRef.current } : {}),
+    }),
   }
 }

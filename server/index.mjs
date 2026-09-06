@@ -6,7 +6,13 @@ import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { WebSocket, WebSocketServer } from 'ws'
 import { createAuditLog } from './audit-log.mjs'
-import { validateGameState, validateTradeResolution } from './game-state-validation.mjs'
+import {
+  validateAuctionTransition,
+  validateGameState,
+  validatePropertyTransition,
+  validatePurchaseTransition,
+  validateTradeResolution,
+} from './game-state-validation.mjs'
 
 const rootDirectory = fileURLToPath(new URL('..', import.meta.url))
 const dataDirectory = process.env.DATA_DIR ? normalize(process.env.DATA_DIR) : join(rootDirectory, 'data')
@@ -530,30 +536,38 @@ const handleLobbyMessage = (socket, token, message) => {
   }
 
   if (message.type === 'game_event' && room.status === 'playing' && room.game_id) {
-    const game = database.prepare('SELECT state_json FROM games WHERE id = ?').get(room.game_id)
+    const game = database.prepare('SELECT state_json, turn_key FROM games WHERE id = ?').get(room.game_id)
     const state = game?.state_json ? JSON.parse(game.state_json) : null
     const senderId = publicPlayerId(token)
-    if (!state || getTurnActorId(state) !== senderId) {
+    const expectedActorId = getTurnActorId(state)
+    const timeoutController = timeoutControllers.get(room.game_id)
+    const mayHandleTimeout = Boolean(
+      typeof message.timeoutId === 'string' &&
+      timeoutController?.timeoutId === message.timeoutId &&
+      timeoutController.turnKey === game?.turn_key &&
+      timeoutController.claimedBy === senderId,
+    )
+    if (!state || (expectedActorId !== senderId && !mayHandleTimeout)) {
       trace('game_event_rejected', {
         gameId: room.game_id,
         senderId,
-        expectedActorId: getTurnActorId(state),
+        expectedActorId,
         reason: state ? 'not_actor' : 'no_state',
       })
       return
     }
     const event = message.event
     const validDiceRoll = event?.kind === 'dice-roll'
-      && event.playerId === senderId
+      && event.playerId === expectedActorId
       && Array.isArray(event.dice) && event.dice.length === 2
       && event.dice.every((value) => Number.isInteger(value) && value >= 1 && value <= 6)
     const validMovement = event?.kind === 'movement'
-      && event.playerId === senderId
+      && event.playerId === expectedActorId
       && Number.isInteger(event.startPosition) && event.startPosition >= 0 && event.startPosition < 40
       && Number.isInteger(event.steps) && event.steps >= 1 && event.steps <= 40
       && (event.direction === 1 || event.direction === -1)
     const validDirectMovement = event?.kind === 'direct-movement'
-      && event.playerId === senderId
+      && event.playerId === expectedActorId
       && Number.isInteger(event.startPosition) && event.startPosition >= 0 && event.startPosition < 40
       && Number.isInteger(event.destinationPosition) && event.destinationPosition >= 0 && event.destinationPosition < 40
       && Number.isFinite(event.speedMultiplier) && event.speedMultiplier >= 0.5 && event.speedMultiplier <= 3
@@ -701,6 +715,20 @@ const handleLobbyMessage = (socket, token, message) => {
         reason: tradeResolutionError,
       })
       send(socket, { type: 'action_error', message: 'Сервер отклонил некорректный обмен' })
+      return
+    }
+    const economyTransitionError = storedState
+      ? validatePurchaseTransition(storedState, state) ??
+        validateAuctionTransition(storedState, state) ??
+        validatePropertyTransition(storedState, state, senderId, mayHandleTimeout)
+      : null
+    if (economyTransitionError) {
+      trace('snapshot_rejected', {
+        gameId: room.game_id,
+        senderId,
+        reason: economyTransitionError,
+      })
+      send(socket, { type: 'action_error', message: 'Сервер отклонил некорректную денежную операцию' })
       return
     }
 
