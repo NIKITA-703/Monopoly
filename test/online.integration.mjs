@@ -172,7 +172,7 @@ try {
   const state = {
     players: ids.map((id, index) => ({ id, name: `P${index + 1}`, money: 15000, position: 0, color: '#fff', avatar: 'P' })),
     activePlayerIndex: 0, turnSequence: 0, pendingTileId: null, pendingPayment: null,
-    auction: null, casino: null, tradeDraft: null, owners: { 3: ids[0], 13: ids[1] }, propertyLevels: {},
+    auction: null, casino: null, tradeDraft: null, owners: {}, propertyLevels: {},
     mortgagedPropertyIds: [], mortgageExpiryTurns: {}, logs: [], lastRoll: null,
     eventPaymentQueue: [], hasExtraRoll: false, jailedPlayerIds: [], jailFailedAttempts: {},
     casinoJackpot: 2000, upgradedGroupsThisTurn: [], playerEffects: {}, lapCounts: {}, tradeRequestsThisTurn: 0,
@@ -194,6 +194,25 @@ try {
   assert.ok(invalidMoneyError, 'Сервер должен отклонять отрицательный баланс')
   send(first, {
     type: 'game_snapshot',
+    state: {
+      ...state,
+      players: state.players.map((player, index) => index === 0 ? { ...player, money: 15500 } : player),
+    },
+  })
+  const unexplainedMoneyError = await waitFor(first.socket, (message) =>
+    message.type === 'action_error' && message.message.includes('денежную операцию'))
+  assert.ok(unexplainedMoneyError, 'Даже активный игрок не должен создавать деньги без игровой причины')
+  send(first, {
+    type: 'game_snapshot',
+    state: {
+      ...state,
+      pendingPayment: { payerId: ids[0], amount: 9999, tileId: 0, kind: 'tax' },
+    },
+  })
+  await waitFor(first.socket, (message) =>
+    message.type === 'action_error' && message.message.includes('денежную операцию'))
+  send(first, {
+    type: 'game_snapshot',
     state: { ...state, eliminatedPlayerIds: [ids[1]] },
   })
   const invalidEliminationError = await waitFor(first.socket, (message) =>
@@ -203,9 +222,73 @@ try {
     type: 'game_snapshot',
     state: {
       ...state,
-      players: state.players.map((player, index) => index === 0 ? { ...player, money: 15999 } : player),
+      players: state.players.map((player, index) => index === 0 ? { ...player, position: 3 } : player),
+      pendingTileId: 3,
+    },
+  })
+  const firstPurchaseDecision = await waitFor(second.socket, (message) =>
+    message.type === 'game_state' && message.state.pendingTileId === 3)
+  send(first, {
+    type: 'game_snapshot',
+    state: {
+      ...firstPurchaseDecision.state,
+      players: firstPurchaseDecision.state.players.map((player, index) =>
+        index === 0 ? { ...player, money: 14400 } : player),
+      owners: { 3: ids[0] },
+      pendingTileId: null,
+    },
+  })
+  const firstPurchase = await waitFor(second.socket, (message) =>
+    message.type === 'game_state' && message.state.owners?.[3] === ids[0])
+  send(first, {
+    type: 'game_snapshot',
+    state: {
+      ...firstPurchase.state,
+      activePlayerIndex: 1,
+      turnSequence: 1,
+    },
+  })
+  const secondTurn = await waitFor(second.socket, (message) =>
+    message.type === 'game_state' && message.state.activePlayerIndex === 1 && message.state.turnSequence === 1)
+  send(second, {
+    type: 'game_snapshot',
+    state: {
+      ...secondTurn.state,
+      players: secondTurn.state.players.map((player, index) => index === 1 ? { ...player, position: 13 } : player),
+      pendingTileId: 13,
+    },
+  })
+  const secondPurchaseDecision = await waitFor(second.socket, (message) =>
+    message.type === 'game_state' && message.state.pendingTileId === 13)
+  send(second, {
+    type: 'game_snapshot',
+    state: {
+      ...secondPurchaseDecision.state,
+      players: secondPurchaseDecision.state.players.map((player, index) =>
+        index === 1 ? { ...player, money: 13600 } : player),
+      owners: { ...secondPurchaseDecision.state.owners, 13: ids[1] },
+      pendingTileId: null,
+    },
+  })
+  const secondPurchase = await waitFor(first.socket, (message) =>
+    message.type === 'game_state' && message.state.owners?.[13] === ids[1])
+  send(second, {
+    type: 'game_snapshot',
+    state: {
+      ...secondPurchase.state,
+      activePlayerIndex: 0,
+      turnSequence: 2,
+    },
+  })
+  const ownedState = (await waitFor(first.socket, (message) =>
+    message.type === 'game_state' && message.state.activePlayerIndex === 0 && message.state.turnSequence === 2)).state
+  send(first, {
+    type: 'game_snapshot',
+    state: {
+      ...ownedState,
+      players: ownedState.players.map((player, index) => index === 0 ? { ...player, money: 15399 } : player),
       mortgagedPropertyIds: [3],
-      mortgageExpiryTurns: { 3: 15 },
+      mortgageExpiryTurns: { 3: 17 },
     },
   })
   await waitFor(first.socket, (message) =>
@@ -213,10 +296,10 @@ try {
   send(first, {
     type: 'game_snapshot',
     state: {
-      ...state,
-      players: state.players.map((player, index) => index === 0 ? { ...player, money: 15300 } : player),
+      ...ownedState,
+      players: ownedState.players.map((player, index) => index === 0 ? { ...player, money: 14700 } : player),
       mortgagedPropertyIds: [3],
-      mortgageExpiryTurns: { 3: 15 },
+      mortgageExpiryTurns: { 3: 17 },
     },
   })
   const mortgagedSnapshot = await waitFor(second.socket, (message) =>
@@ -226,14 +309,14 @@ try {
     state: {
       ...mortgagedSnapshot.state,
       players: mortgagedSnapshot.state.players.map((player, index) =>
-        index === 0 ? { ...player, money: 14940 } : player),
+        index === 0 ? { ...player, money: 14340 } : player),
       mortgagedPropertyIds: [],
       mortgageExpiryTurns: {},
     },
   })
   const redeemedSnapshot = await waitFor(second.socket, (message) =>
     message.type === 'game_state' && message.state.mortgagedPropertyIds?.length === 0 &&
-      message.state.players[0].money === 14940)
+      message.state.players[0].money === 14340)
   send(first, { type: 'turn_action_started' })
   const lockedTurn = await waitFor(second.socket, (message) => message.type === 'turn_deadline')
   assert.ok(lockedTurn.turnDeadline - Date.now() > 25000, 'Нажатие броска должно блокировать старый таймер на время действия')
@@ -241,10 +324,22 @@ try {
     type: 'game_snapshot',
     state: {
       ...redeemedSnapshot.state,
+      players: redeemedSnapshot.state.players.map((player, index) =>
+        index === 0 ? { ...player, position: 1 } : player),
+      pendingTileId: 1,
+    },
+  })
+  const pendingAuctionSnapshot = await waitFor(second.socket, (message) =>
+    message.type === 'game_state' && message.state.pendingTileId === 1)
+  send(first, {
+    type: 'game_snapshot',
+    state: {
+      ...pendingAuctionSnapshot.state,
+      pendingTileId: null,
       auction: {
         tileId: 1,
-        participantIds: ids,
-        activeBidderId: ids[0],
+        participantIds: ids.slice(1),
+        activeBidderId: ids[1],
         currentBid: 600,
         highestBidderId: null,
         passedIds: [],
@@ -252,33 +347,34 @@ try {
     },
   })
   const auctionSnapshot = await waitFor(second.socket, (message) =>
-    message.type === 'game_state' && message.state.auction?.activeBidderId === ids[0])
+    message.type === 'game_state' && message.state.auction?.activeBidderId === ids[1])
   assert.ok(auctionSnapshot.turnDeadline - Date.now() > 1000, 'Аукционный таймер должен учитывать AUCTION_SECONDS')
   assert.ok(auctionSnapshot.turnDeadline - Date.now() <= 2200, 'Аукционный таймер не должен использовать время обычного хода')
-  send(first, {
+  send(second, {
     type: 'game_snapshot',
     state: {
       ...auctionSnapshot.state,
-      owners: { ...auctionSnapshot.state.owners, 1: ids[0] },
+      owners: { ...auctionSnapshot.state.owners, 1: ids[1] },
       auction: null,
     },
   })
-  await waitFor(first.socket, (message) =>
+  await waitFor(second.socket, (message) =>
     message.type === 'action_error' && message.message.includes('денежную операцию'))
   send(first, { type: 'client_presence', visible: false })
   send(second, { type: 'client_presence', visible: true })
   const auctionTimeout = await waitFor(second.socket, (message) =>
-    message.type === 'turn_timeout_granted' && message.actorId === ids[0], 4000)
+    message.type === 'turn_timeout_granted' && message.actorId === ids[1], 4000)
   assert.equal(
     auctionTimeout.actorId,
-    ids[0],
+    ids[1],
     'Сервер должен поручить таймаут активной вкладке, даже когда ходит другой игрок',
   )
   send(second, { type: 'game_snapshot', timeoutId: auctionTimeout.timeoutId, state: redeemedSnapshot.state })
   await waitFor(second.socket, (message) => message.type === 'game_state' && message.state.auction === null)
   send(first, { type: 'client_presence', visible: true })
   send(second, { type: 'client_presence', visible: false })
-  send(first, { type: 'game_event', event: { kind: 'movement', playerId: ids[0], startPosition: 0, steps: 6, direction: 1 } })
+  send(first, { type: 'game_event', event: { kind: 'dice-roll', playerId: ids[0], dice: [1, 2] } })
+  send(first, { type: 'game_event', event: { kind: 'movement', playerId: ids[0], startPosition: 3, steps: 3, direction: 1 } })
   const movementEvents = await Promise.all([second, third, fourth, fifth].map((client) =>
     waitFor(client.socket, (message) => message.type === 'game_event' && message.event.kind === 'movement')))
   assert.equal(new Set(movementEvents.map((message) => message.eventId)).size, 1, 'Все клиенты должны получить одно событие движения')
@@ -324,7 +420,7 @@ try {
   )
   send(second, { type: 'chat_message', text: 'Привет' })
   const chatSnapshot = await waitFor(first.socket, (message) => message.type === 'game_state' && message.state.logs?.some((entry) => entry.kind === 'chat'))
-  assert.equal(chatSnapshot.state.players[0].money, 14940, 'Неактивный игрок не должен перезаписывать состояние')
+  assert.equal(chatSnapshot.state.players[0].money, 14340, 'Неактивный игрок не должен перезаписывать состояние')
   const auditRecords = readFileSync(join(dataDirectory, 'audit', 'game-actions.jsonl'), 'utf8')
     .split(/\r?\n/)
     .filter(Boolean)

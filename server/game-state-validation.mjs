@@ -19,6 +19,28 @@ const GROUP_UPGRADE_COSTS = new Map([
   ['fashion', 500], ['sportswear', 500], ['gaming', 750], ['big-tech', 1000],
   ['ai', 1250], ['creators', 1500], ['social', 1750], ['space', 2000],
 ])
+const CHANCE_TILE_IDS = new Set([2, 7, 17, 33, 38])
+const DIAMOND_TILE_IDS = new Set([36])
+const CASINO_BET = 1000
+const INITIAL_CASINO_JACKPOT = 2000
+const CASINO_JACKPOT_STEP = 250
+const JAIL_RELEASE_COST = 500
+const TAX_TILE_IDS = new Set([4, 22])
+const SUBSCRIPTION_TILE_IDS = new Set([12, 28])
+const FLEET_TILE_IDS = new Set([5, 15, 25, 35])
+const PROPERTY_RENTS = new Map([
+  [1, [20, 100, 300, 900, 1600, 2500]], [3, [40, 200, 600, 1800, 3200, 4500]],
+  [6, [60, 300, 900, 2700, 4000, 5500]], [8, [60, 300, 900, 2700, 4000, 5500]],
+  [9, [80, 400, 1000, 3000, 4500, 6000]], [11, [100, 500, 1500, 4500, 6250, 7500]],
+  [13, [100, 500, 1500, 4500, 6250, 7500]], [14, [120, 600, 1800, 5000, 7000, 9000]],
+  [16, [140, 700, 2000, 5500, 7500, 9500]], [18, [140, 700, 2000, 5500, 7500, 9500]],
+  [19, [160, 800, 2200, 6000, 8000, 10000]], [21, [180, 900, 2500, 7000, 8750, 10500]],
+  [23, [180, 900, 2500, 7000, 8750, 10500]], [24, [200, 1000, 3000, 7500, 9250, 11000]],
+  [26, [220, 1100, 3300, 8000, 9750, 11500]], [27, [220, 1100, 3300, 8000, 9750, 11500]],
+  [29, [240, 1200, 3600, 8500, 10250, 12000]], [31, [260, 1300, 3900, 9000, 11000, 12750]],
+  [32, [260, 1300, 3900, 9000, 11000, 12750]], [34, [280, 1500, 4500, 10000, 12000, 14000]],
+  [37, [350, 1750, 5000, 11000, 13000, 15000]], [39, [500, 2000, 6000, 14000, 17000, 20000]],
+])
 
 const isPlainObject = (value) =>
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -29,6 +51,42 @@ const playerMoneyChanged = (previous, next, allowedPlayerIds = []) => {
   const nextPlayers = new Map(next.players.map((player) => [player.id, player]))
   return previous.players.some((player) =>
     !allowed.has(player.id) && nextPlayers.get(player.id)?.money !== player.money)
+}
+const getMoneyDeltas = (previous, next) => {
+  const nextPlayers = new Map(next.players.map((player) => [player.id, player]))
+  return new Map(previous.players
+    .map((player) => [player.id, nextPlayers.get(player.id)?.money - player.money])
+    .filter(([, delta]) => delta !== 0))
+}
+const startBonusForLap = (lapNumber) => {
+  if (lapNumber <= 30) return 2000
+  if (lapNumber <= 35) return 1000
+  if (lapNumber <= 40) return 500
+  return 0
+}
+const changedPropertyState = (previous, next) =>
+  !sameRecord(previous.owners, next.owners) ||
+  !sameRecord(previous.propertyLevels, next.propertyLevels) ||
+  !sameRecord(previous.mortgagedPropertyIds, next.mortgagedPropertyIds)
+
+const liquidationValue = (previous, next, ownerId) => {
+  let value = 0
+  const previousMortgages = new Set(previous.mortgagedPropertyIds ?? [])
+  const nextMortgages = new Set(next.mortgagedPropertyIds ?? [])
+  for (const [tileId, group] of PROPERTY_GROUPS) {
+    if (previous.owners?.[tileId] !== ownerId || next.owners?.[tileId] !== ownerId) continue
+    const beforeLevel = previous.propertyLevels?.[tileId] ?? 0
+    const afterLevel = next.propertyLevels?.[tileId] ?? 0
+    if (afterLevel > beforeLevel) return null
+    value += (beforeLevel - afterLevel) * Math.round(((GROUP_UPGRADE_COSTS.get(group) ?? 0) * 0.75) / 10) * 10
+    if (!previousMortgages.has(tileId) && nextMortgages.has(tileId)) {
+      if (afterLevel !== 0) return null
+      value += Math.round(PROPERTY_PRICES.get(tileId) * 0.5)
+    } else if (previousMortgages.has(tileId) !== nextMortgages.has(tileId)) {
+      return null
+    }
+  }
+  return value
 }
 
 const sameIds = (actualIds, expectedIds) => {
@@ -151,6 +209,55 @@ export const validateGameState = (state, expectedPlayerIds) => {
     ) return 'invalid_auction'
   }
 
+  if (state.pendingPayment != null) {
+    const payment = state.pendingPayment
+    if (
+      !isPlainObject(payment) || !playerIdSet.has(payment.payerId) ||
+      (payment.recipientId != null && (!playerIdSet.has(payment.recipientId) || payment.recipientId === payment.payerId)) ||
+      !Number.isSafeInteger(payment.amount) || payment.amount <= 0 ||
+      !Number.isInteger(payment.tileId) || payment.tileId < 0 || payment.tileId >= BOARD_SIZE ||
+      !['rent', 'tax', 'event'].includes(payment.kind)
+    ) return 'invalid_pending_payment'
+  }
+  if (!Array.isArray(state.eventPaymentQueue)) return 'invalid_event_payment_queue'
+  for (const payment of state.eventPaymentQueue) {
+    if (
+      !isPlainObject(payment) || !playerIdSet.has(payment.payerId) ||
+      (payment.recipientId != null && (!playerIdSet.has(payment.recipientId) || payment.recipientId === payment.payerId)) ||
+      !Number.isSafeInteger(payment.amount) || payment.amount <= 0 ||
+      !Number.isInteger(payment.tileId) || payment.tileId < 0 || payment.tileId >= BOARD_SIZE
+    ) return 'invalid_event_payment_queue'
+  }
+  if (!Number.isSafeInteger(state.casinoJackpot) || state.casinoJackpot < INITIAL_CASINO_JACKPOT) {
+    return 'invalid_casino_jackpot'
+  }
+  if (state.casino != null) {
+    const casino = state.casino
+    const selectedNumbers = Array.isArray(casino.selectedNumbers) ? casino.selectedNumbers : []
+    if (
+      !isPlainObject(casino) || !playerIdSet.has(casino.playerId) ||
+      selectedNumbers.length > 3 || new Set(selectedNumbers).size !== selectedNumbers.length ||
+      selectedNumbers.some((value) => !Number.isInteger(value) || value < 1 || value > 6) ||
+      (casino.rolledNumber != null && (!Number.isInteger(casino.rolledNumber) || casino.rolledNumber < 1 || casino.rolledNumber > 6)) ||
+      (casino.payout != null && (!Number.isSafeInteger(casino.payout) || casino.payout < 0)) ||
+      (casino.jackpotWon != null && typeof casino.jackpotWon !== 'boolean')
+    ) return 'invalid_casino'
+  }
+
+  return null
+}
+
+export const validateInitialGameState = (state) => {
+  if (
+    state.activePlayerIndex !== 0 || state.turnSequence !== 0 ||
+    state.players.some((player) => player.money !== 15000 || player.position !== 0) ||
+    Object.keys(state.owners ?? {}).length !== 0 || Object.keys(state.propertyLevels ?? {}).length !== 0 ||
+    (state.mortgagedPropertyIds ?? []).length !== 0 || Object.keys(state.mortgageExpiryTurns ?? {}).length !== 0 ||
+    state.pendingTileId != null || state.pendingPayment != null || state.auction != null ||
+    state.tradeDraft != null || state.casino != null ||
+    (state.eliminatedPlayerIds ?? []).length !== 0 || state.winnerId != null ||
+    state.casinoJackpot !== INITIAL_CASINO_JACKPOT
+  ) return 'invalid_initial_state'
   return null
 }
 
@@ -211,7 +318,25 @@ export const validatePurchaseTransition = (previous, next) => {
 
 export const validateAuctionTransition = (previous, next) => {
   const auction = previous?.auction
-  if (!auction) return null
+  if (!auction) {
+    if (!next?.auction) return null
+    const actorId = previous.players[previous.activePlayerIndex]?.id
+    const tileId = previous.pendingTileId
+    const startingPrice = PROPERTY_PRICES.get(tileId)
+    const eliminatedIds = new Set(previous.eliminatedPlayerIds ?? [])
+    const expectedParticipants = previous.players
+      .filter((player) => player.id !== actorId && !eliminatedIds.has(player.id) &&
+        player.money >= startingPrice + 100)
+      .map((player) => player.id)
+    if (
+      next.auction.tileId !== tileId || previous.owners?.[tileId] != null ||
+      !sameIds(next.auction.participantIds, expectedParticipants) ||
+      next.auction.activeBidderId !== expectedParticipants[0] ||
+      next.auction.currentBid !== startingPrice || next.auction.highestBidderId != null ||
+      next.auction.passedIds.length !== 0
+    ) return 'invalid_auction_creation'
+    return null
+  }
   if (next.auction) {
     if (
       !sameRecord(previous.owners, next.owners) ||
@@ -344,4 +469,244 @@ export const validatePropertyTransition = (previous, next, senderId, mayHandleTi
     next.mortgageExpiryTurns?.[tileId] == null
   ) return null
   return 'invalid_redemption'
+}
+
+export const validateMoneyTransition = (previous, next, senderId, movementAuthorization = null) => {
+  const deltas = getMoneyDeltas(previous, next)
+  if (deltas.size === 0) return null
+  const actorId = previous.players[previous.activePlayerIndex]?.id
+  const newlyEliminated = (next.eliminatedPlayerIds ?? [])
+    .filter((id) => !(previous.eliminatedPlayerIds ?? []).includes(id))
+  if (newlyEliminated.length > 0) {
+    const expectedDeltas = new Map(newlyEliminated.map((playerId) => {
+      const player = previous.players.find((item) => item.id === playerId)
+      return [playerId, -(player?.money ?? 0)]
+    }))
+    const payment = previous.pendingPayment
+    if (payment && newlyEliminated.includes(payment.payerId) && payment.recipientId) {
+      const payer = previous.players.find((player) => player.id === payment.payerId)
+      const transferred = Math.min(payer?.money ?? 0, payment.amount)
+      expectedDeltas.set(payment.recipientId, (expectedDeltas.get(payment.recipientId) ?? 0) + transferred)
+    }
+    for (const [playerId, delta] of [...expectedDeltas]) {
+      if (delta === 0) expectedDeltas.delete(playerId)
+    }
+    const valid = expectedDeltas.size === deltas.size &&
+      [...expectedDeltas].every(([playerId, delta]) => deltas.get(playerId) === delta)
+    return valid ? null : 'invalid_elimination_balance'
+  }
+
+  const purchaseTileId = previous.pendingTileId
+  const isPurchase = purchaseTileId != null && next.pendingTileId == null &&
+    previous.owners?.[purchaseTileId] == null && next.owners?.[purchaseTileId] === actorId
+  const isAuction = Boolean(previous.auction)
+  const isTrade = previous.tradeDraft?.stage === 'review' && next.tradeDraft == null &&
+    (changedPropertyState(previous, next) || deltas.size > 0)
+  const isManualPropertyOperation = previous.turnSequence === next.turnSequence &&
+    !isPurchase && !isAuction && !isTrade && changedPropertyState(previous, next)
+  if (isPurchase || isAuction || isTrade || isManualPropertyOperation) return null
+
+  const payment = previous.pendingPayment
+  if (payment && previous.players.some((player) => player.id === payment.payerId)) {
+    const payer = previous.players.find((player) => player.id === payment.payerId)
+    const raised = changedPropertyState(previous, next)
+      ? liquidationValue(previous, next, payment.payerId)
+      : 0
+    if (raised == null) return 'invalid_payment_liquidation'
+    const expectedPayerDelta = raised - payment.amount
+    if (payer.money + expectedPayerDelta < 0 || deltas.get(payment.payerId) !== expectedPayerDelta) {
+      return 'invalid_payment_balance'
+    }
+    if (payment.recipientId && deltas.get(payment.recipientId) !== payment.amount) {
+      return 'invalid_payment_recipient'
+    }
+    const allowedIds = new Set([payment.payerId, payment.recipientId].filter(Boolean))
+    return [...deltas.keys()].every((playerId) => allowedIds.has(playerId))
+      ? null
+      : 'invalid_payment_participants'
+  }
+
+  const actorWasJailed = (previous.jailedPlayerIds ?? []).includes(actorId)
+  const actorStillJailed = (next.jailedPlayerIds ?? []).includes(actorId)
+  if (actorWasJailed && !actorStillJailed) {
+    const freeRelease = Boolean(previous.playerEffects?.[actorId]?.freeJailRelease)
+    const raised = changedPropertyState(previous, next) ? liquidationValue(previous, next, actorId) : 0
+    const expectedDelta = freeRelease ? 0 : (raised ?? 0) - JAIL_RELEASE_COST
+    return raised != null && deltas.size === 1 && deltas.get(actorId) === expectedDelta
+      ? null
+      : 'invalid_jail_payment'
+  }
+
+  const previousCasino = previous.casino
+  const nextCasino = next.casino
+  if (previousCasino && previousCasino.rolledNumber == null && nextCasino?.rolledNumber != null) {
+    const selectedNumbers = previousCasino.selectedNumbers ?? []
+    const rolledNumber = nextCasino.rolledNumber
+    const guessed = selectedNumbers.includes(rolledNumber)
+    const regularPayout = guessed ? Math.round(CASINO_BET * (6 / selectedNumbers.length)) : 0
+    const jackpotWon = Boolean(nextCasino.jackpotWon)
+    const payout = regularPayout + (jackpotWon ? previous.casinoJackpot : 0)
+    const validJackpot = jackpotWon
+      ? next.casinoJackpot === INITIAL_CASINO_JACKPOT
+      : next.casinoJackpot === previous.casinoJackpot + CASINO_JACKPOT_STEP
+    if (
+      senderId !== previousCasino.playerId ||
+      !Number.isInteger(rolledNumber) || rolledNumber < 1 || rolledNumber > 6 ||
+      selectedNumbers.length < 1 || selectedNumbers.length > 3 ||
+      nextCasino.payout !== payout || !validJackpot ||
+      deltas.size !== 1 || deltas.get(previousCasino.playerId) !== payout - CASINO_BET
+    ) return 'invalid_casino_balance'
+    return null
+  }
+
+  const actorDelta = deltas.get(actorId)
+  if (deltas.size === 1 && actorDelta > 0) {
+    const lapNumber = next.lapCounts?.[actorId] ?? 0
+    const rewardKeys = new Set(previous.serverEconomy?.rewardKeys ?? [])
+    const startRewardKey = `start:${actorId}:${lapNumber}`
+    const pendingBookBonusKeys = new Set(previous.serverEconomy?.pendingBookBonusKeys ?? [])
+    const bookBonus = previous.playerEffects?.[actorId]?.bookChallenge || pendingBookBonusKeys.has(startRewardKey)
+      ? 500
+      : 0
+    const startReward = startBonusForLap(lapNumber) + bookBonus
+    if (
+      movementAuthorization?.playerId === actorId && movementAuthorization.passedStart &&
+      movementAuthorization.destination === next.players.find((player) => player.id === actorId)?.position &&
+      movementAuthorization.lapNumber === lapNumber &&
+      actorDelta === startReward && !rewardKeys.has(startRewardKey)
+    ) {
+      pendingBookBonusKeys.delete(startRewardKey)
+      next.serverEconomy = {
+        ...next.serverEconomy,
+        rewardKeys: [...rewardKeys, startRewardKey].slice(-200),
+        pendingBookBonusKeys: [...pendingBookBonusKeys],
+      }
+      return null
+    }
+
+    const position = next.players.find((player) => player.id === actorId)?.position
+    const eventRewardKey = `event:${actorId}:${previous.turnSequence}`
+    const validChanceReward = CHANCE_TILE_IDS.has(position) &&
+      (actorDelta === 250 || (actorDelta >= 200 && actorDelta <= 800 && actorDelta % 10 === 0))
+    const validDiamondReward = DIAMOND_TILE_IDS.has(position) && [250, 500, 750, 1000].includes(actorDelta)
+    if ((validChanceReward || validDiamondReward) && !rewardKeys.has(eventRewardKey)) {
+      next.serverEconomy = { ...next.serverEconomy, rewardKeys: [...rewardKeys, eventRewardKey].slice(-200) }
+      return null
+    }
+  }
+
+  if (CHANCE_TILE_IDS.has(next.players.find((player) => player.id === actorId)?.position)) {
+    for (const contribution of [100, 300]) {
+      const expected = new Map()
+      let received = 0
+      for (const player of previous.players) {
+        if (player.id === actorId || (previous.eliminatedPlayerIds ?? []).includes(player.id)) continue
+        const amount = Math.min(contribution, player.money)
+        if (amount > 0) expected.set(player.id, -amount)
+        received += amount
+      }
+      if (received > 0) expected.set(actorId, received)
+      if (expected.size === deltas.size && [...expected].every(([id, delta]) => deltas.get(id) === delta)) {
+        const rewardKeys = new Set(previous.serverEconomy?.rewardKeys ?? [])
+        const eventRewardKey = `event:${actorId}:${previous.turnSequence}`
+        if (rewardKeys.has(eventRewardKey)) return 'duplicate_event_reward'
+        next.serverEconomy = { ...next.serverEconomy, rewardKeys: [...rewardKeys, eventRewardKey].slice(-200) }
+        return null
+      }
+    }
+  }
+
+  return 'unexplained_money_change'
+}
+
+export const validatePendingPaymentTransition = (previous, next) => {
+  if (previous.pendingPayment || !next.pendingPayment) return null
+  const payment = next.pendingPayment
+  const actorId = previous.players[previous.activePlayerIndex]?.id
+  const actor = next.players.find((player) => player.id === actorId)
+  if (!actor || payment.payerId !== actorId || actor.position !== payment.tileId) {
+    return 'invalid_payment_actor'
+  }
+  if (next.eventPaymentQueue.length !== 0) return 'invalid_event_payment_queue_creation'
+
+  if (payment.kind === 'rent') {
+    const ownerId = next.owners?.[payment.tileId]
+    if (
+      ownerId == null || ownerId === actorId || payment.recipientId !== ownerId ||
+      (next.mortgagedPropertyIds ?? []).includes(payment.tileId)
+    ) return 'invalid_rent_recipient'
+    let baseRent = 0
+    if (SUBSCRIPTION_TILE_IDS.has(payment.tileId)) {
+      const ownedCount = [...SUBSCRIPTION_TILE_IDS].filter((tileId) => next.owners?.[tileId] === ownerId).length
+      const multiplier = ownedCount >= 2 ? 250 : 100
+      const dice = next.lastRoll?.dice
+      if (!Array.isArray(dice) || dice.length !== 2) return 'invalid_rent_roll'
+      baseRent = (dice[0] + dice[1]) * multiplier
+    } else if (FLEET_TILE_IDS.has(payment.tileId)) {
+      const ownedCount = [...FLEET_TILE_IDS].filter((tileId) => next.owners?.[tileId] === ownerId).length
+      baseRent = [250, 500, 1000, 2000][Math.max(0, Math.min(3, ownedCount - 1))]
+    } else {
+      const rents = PROPERTY_RENTS.get(payment.tileId)
+      baseRent = rents?.[next.propertyLevels?.[payment.tileId] ?? 0] ?? 0
+    }
+    const payerAdjustment = previous.playerEffects?.[actorId]?.nextRentAdjustment ?? 0
+    const ownerAdjustment = previous.playerEffects?.[ownerId]?.nextVisitorAdjustment ?? 0
+    return payment.amount === Math.max(0, baseRent + payerAdjustment + ownerAdjustment)
+      ? null
+      : 'invalid_rent_amount'
+  }
+
+  if (payment.kind === 'tax') {
+    if (!TAX_TILE_IDS.has(payment.tileId) || payment.recipientId != null) return 'invalid_tax_payment'
+    const ownedTiles = [...PROPERTY_PRICES.keys()].filter((tileId) => next.owners?.[tileId] === actorId)
+    const smallStars = ownedTiles.reduce((total, tileId) => {
+      const level = next.propertyLevels?.[tileId] ?? 0
+      return total + (level === MAX_PROPERTY_LEVEL ? 0 : level)
+    }, 0)
+    const allStars = ownedTiles.filter((tileId) => (next.propertyLevels?.[tileId] ?? 0) === MAX_PROPERTY_LEVEL).length
+    const allowedAmounts = new Set([
+      ownedTiles.length * 100,
+      smallStars * 250 + allStars * 1000,
+    ])
+    const isRegularTax = payment.amount >= 100 && payment.amount <= 700 && payment.amount % 10 === 0
+    return isRegularTax || allowedAmounts.has(payment.amount) ? null : 'invalid_tax_amount'
+  }
+
+  if (payment.kind === 'event') {
+    const isChance = CHANCE_TILE_IDS.has(payment.tileId)
+    const isDiamond = DIAMOND_TILE_IDS.has(payment.tileId)
+    if (!isChance && !isDiamond) return 'invalid_event_payment'
+    if (payment.recipientId != null) {
+      return isChance && payment.amount === 100 ? null : 'invalid_event_transfer'
+    }
+    const validChanceCharge = isChance && payment.amount >= 100 && payment.amount <= 990 && payment.amount % 10 === 0
+    const validDiamondCharge = isDiamond && [250, 500, 750, 1000].includes(payment.amount)
+    return validChanceCharge || validDiamondCharge ? null : 'invalid_event_amount'
+  }
+  return 'invalid_payment_kind'
+}
+
+export const validatePendingTileTransition = (previous, next) => {
+  if (previous.pendingTileId != null || next.pendingTileId == null) return null
+  const actorId = previous.players[previous.activePlayerIndex]?.id
+  const actor = next.players.find((player) => player.id === actorId)
+  const tileId = next.pendingTileId
+  if (
+    !BRAND_TILE_IDS.has(tileId) || actor?.position !== tileId || next.owners?.[tileId] != null ||
+    next.pendingPayment != null || next.auction != null || next.casino != null || next.tradeDraft != null
+  ) return 'invalid_purchase_decision'
+  return null
+}
+
+export const validateCasinoTransition = (previous, next) => {
+  if (previous.casino || !next.casino) return null
+  const actorId = previous.players[previous.activePlayerIndex]?.id
+  const actor = next.players.find((player) => player.id === actorId)
+  if (
+    actor?.position !== 20 || next.casino.playerId !== actorId ||
+    next.casino.selectedNumbers.length !== 0 || next.casino.rolledNumber != null ||
+    next.casino.payout != null || next.casino.jackpotWon != null ||
+    next.casinoJackpot !== previous.casinoJackpot
+  ) return 'invalid_casino_creation'
+  return null
 }

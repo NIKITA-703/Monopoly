@@ -8,7 +8,12 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { createAuditLog } from './audit-log.mjs'
 import {
   validateAuctionTransition,
+  validateCasinoTransition,
   validateGameState,
+  validateInitialGameState,
+  validateMoneyTransition,
+  validatePendingPaymentTransition,
+  validatePendingTileTransition,
   validatePropertyTransition,
   validatePurchaseTransition,
   validateTradeResolution,
@@ -93,6 +98,8 @@ let countdownTimer = null
 const timeoutControllers = new Map()
 const gameReturnTimers = new Map()
 const turnActionControllers = new Map()
+const movementAuthorizations = new Map()
+const rollAuthorizations = new Map()
 const idempotentMessageTypes = new Set([
   'claim_seat',
   'leave_seat',
@@ -342,6 +349,40 @@ const normalizeEliminatedState = (state) => {
   return state
 }
 
+const settleBalancesForElimination = (previous, next, newlyEliminatedIds) => {
+  if (!previous || newlyEliminatedIds.length === 0) return
+  const eliminatedIds = new Set(newlyEliminatedIds)
+  const balances = new Map(previous.players.map((player) => [player.id, player.money]))
+  const payment = previous.pendingPayment
+  if (payment && eliminatedIds.has(payment.payerId) && payment.recipientId && balances.has(payment.recipientId)) {
+    const available = Math.min(balances.get(payment.payerId) ?? 0, payment.amount)
+    balances.set(payment.recipientId, (balances.get(payment.recipientId) ?? 0) + available)
+  }
+  for (const playerId of eliminatedIds) balances.set(playerId, 0)
+  next.players = next.players.map((player) => ({
+    ...player,
+    money: balances.get(player.id) ?? player.money,
+    ...(eliminatedIds.has(player.id) ? { lastDelta: 0 } : {}),
+  }))
+}
+
+const preservePendingServerRewards = (previous, next) => {
+  if (!previous) return
+  const pendingBookBonusKeys = new Set(previous.serverEconomy?.pendingBookBonusKeys ?? [])
+  for (const player of previous.players) {
+    const previousLap = previous.lapCounts?.[player.id] ?? 0
+    const nextLap = next.lapCounts?.[player.id] ?? 0
+    if (
+      previous.playerEffects?.[player.id]?.bookChallenge &&
+      !next.playerEffects?.[player.id]?.bookChallenge && nextLap > previousLap
+    ) pendingBookBonusKeys.add(`start:${player.id}:${nextLap}`)
+  }
+  next.serverEconomy = {
+    ...next.serverEconomy,
+    pendingBookBonusKeys: [...pendingBookBonusKeys].slice(-50),
+  }
+}
+
 const getTurnKey = (state) => JSON.stringify({
   turn: state?.turnSequence ?? 0,
   actor: getTurnActorId(state),
@@ -369,6 +410,8 @@ const returnGameToLobby = (gameId, reason) => {
   database.prepare('UPDATE sessions SET ready = 0, last_seen = ? WHERE seat IS NOT NULL').run(Date.now())
   timeoutControllers.delete(gameId)
   turnActionControllers.delete(gameId)
+  movementAuthorizations.delete(gameId)
+  rollAuthorizations.delete(gameId)
   trace('game_returned_to_lobby', { gameId, reason })
   broadcastLobby()
 }
@@ -575,6 +618,37 @@ const handleLobbyMessage = (socket, token, message) => {
       trace('game_event_rejected', { gameId: room.game_id, senderId, reason: 'invalid_payload' })
       return
     }
+    if (validDiceRoll) {
+      rollAuthorizations.set(room.game_id, {
+        playerId: expectedActorId,
+        steps: event.dice[0] + event.dice[1],
+      })
+    }
+    if (validMovement) {
+      const player = state.players.find((item) => item.id === expectedActorId)
+      const authorizedRoll = rollAuthorizations.get(room.game_id)
+      if (
+        player?.position !== event.startPosition ||
+        authorizedRoll?.playerId !== expectedActorId || authorizedRoll.steps !== event.steps
+      ) {
+        trace('game_event_rejected', {
+          gameId: room.game_id,
+          senderId,
+          expectedActorId,
+          reason: 'invalid_movement_start',
+        })
+        return
+      }
+      const rawDestination = event.startPosition + event.steps * event.direction
+      const passedStart = event.direction === 1 && rawDestination >= 40
+      movementAuthorizations.set(room.game_id, {
+        playerId: expectedActorId,
+        destination: (rawDestination + 40 * 2) % 40,
+        passedStart,
+        lapNumber: (state.lapCounts?.[expectedActorId] ?? 0) + (passedStart ? 1 : 0),
+      })
+      rollAuthorizations.delete(room.game_id)
+    }
     const payload = { type: 'game_event', gameId: room.game_id, eventId: randomUUID(), senderId, event }
     if (validMovement || validDirectMovement) recordLanding(room.game_id, state, event)
     for (const client of clients.keys()) send(client, payload)
@@ -623,9 +697,13 @@ const handleLobbyMessage = (socket, token, message) => {
     if (!state || typeof state !== 'object' || !Array.isArray(state.players)) return
     const storedGame = database.prepare('SELECT state_json, updated_at, turn_key, turn_deadline FROM games WHERE id = ?').get(room.game_id)
     const storedState = storedGame?.state_json ? JSON.parse(storedGame.state_json) : null
+    // Клиент не может удалить отметки уже выданных сервером наград.
+    state.serverEconomy = storedState?.serverEconomy ?? { rewardKeys: [] }
+    preservePendingServerRewards(storedState, state)
     const expectedPlayerIds = storedState?.players?.map((player) => player.id)
       ?? sessionRows().filter((item) => item.seat !== null).map((item) => publicPlayerId(item.token))
-    const validationError = validateGameState(state, expectedPlayerIds)
+    const validationError = validateGameState(state, expectedPlayerIds) ??
+      (!storedState ? validateInitialGameState(state) : null)
     if (validationError) {
       const senderId = publicPlayerId(token)
       trace('snapshot_rejected', {
@@ -683,6 +761,9 @@ const handleLobbyMessage = (socket, token, message) => {
       send(socket, { type: 'action_error', message: 'Сервер отклонил некорректное исключение игрока' })
       return
     }
+    const newlyEliminatedIds = [...submittedEliminatedIds]
+      .filter((id) => !previousEliminatedIds.has(id))
+    settleBalancesForElimination(storedState, state, newlyEliminatedIds)
     const remainingPlayerIds = state.players
       .map((player) => player.id)
       .filter((playerId) => !submittedEliminatedIds.has(playerId))
@@ -720,7 +801,11 @@ const handleLobbyMessage = (socket, token, message) => {
     const economyTransitionError = storedState
       ? validatePurchaseTransition(storedState, state) ??
         validateAuctionTransition(storedState, state) ??
-        validatePropertyTransition(storedState, state, senderId, mayHandleTimeout)
+        validateCasinoTransition(storedState, state) ??
+        validatePendingPaymentTransition(storedState, state) ??
+        validatePendingTileTransition(storedState, state) ??
+        validatePropertyTransition(storedState, state, senderId, mayHandleTimeout) ??
+        validateMoneyTransition(storedState, state, senderId, movementAuthorizations.get(room.game_id))
       : null
     if (economyTransitionError) {
       trace('snapshot_rejected', {
@@ -800,6 +885,13 @@ const handleLobbyMessage = (socket, token, message) => {
     turnActionControllers.delete(room.game_id)
     database.prepare('UPDATE games SET state_json = ?, updated_at = ?, turn_key = ?, turn_deadline = ? WHERE id = ?')
       .run(JSON.stringify(state), revision, turnKey, turnDeadline, room.game_id)
+    const movementAuthorization = movementAuthorizations.get(room.game_id)
+    if (movementAuthorization) {
+      const rewardKey = `start:${movementAuthorization.playerId}:${movementAuthorization.lapNumber}`
+      if (!movementAuthorization.passedStart || state.serverEconomy?.rewardKeys?.includes(rewardKey)) {
+        movementAuthorizations.delete(room.game_id)
+      }
+    }
     broadcastGameState(room.game_id, state, revision, turnDeadline, senderId)
     trace('snapshot', {
       gameId: room.game_id,
