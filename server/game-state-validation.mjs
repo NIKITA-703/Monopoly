@@ -404,7 +404,41 @@ export const validatePropertyTransition = (previous, next, senderId, mayHandleTi
   if (specializedTransition) return null
   const newlyEliminated = (next.eliminatedPlayerIds ?? [])
     .some((id) => !(previous.eliminatedPlayerIds ?? []).includes(id))
-  if (newlyEliminated || mayHandleTimeout || next.turnSequence !== previous.turnSequence) return null
+  if (newlyEliminated) return null
+  if (mayHandleTimeout && (previous.pendingPayment || (previous.jailedPlayerIds ?? []).includes(
+    previous.players[previous.activePlayerIndex]?.id,
+  ))) return null
+  if (next.turnSequence !== previous.turnSequence) {
+    if (next.turnSequence !== previous.turnSequence + 1) return 'invalid_property_turn'
+    const expiredTileIds = new Set(Object.entries(previous.mortgageExpiryTurns ?? {})
+      .filter(([, expiresAt]) => expiresAt <= next.turnSequence)
+      .map(([tileId]) => Number(tileId)))
+    const validExpiredOwners = ownerChanges.every((tileId) =>
+      expiredTileIds.has(tileId) && previous.owners?.[tileId] != null && next.owners?.[tileId] == null)
+    const validExpiredMortgages = mortgageChanges.every((tileId) =>
+      expiredTileIds.has(tileId) && previousMortgages.has(tileId) && !nextMortgages.has(tileId))
+    if (!validExpiredOwners || !validExpiredMortgages) return 'invalid_property_turn_transfer'
+    const eventLevelChanges = levelChanges.filter((tileId) => !expiredTileIds.has(tileId))
+    if (eventLevelChanges.length === 0) return null
+    const actorId = previous.players[previous.activePlayerIndex]?.id
+    const actorPosition = next.players.find((player) => player.id === actorId)?.position
+    if (eventLevelChanges.length !== 1 || !DIAMOND_TILE_IDS.has(actorPosition)) {
+      return 'invalid_property_event'
+    }
+    const tileId = eventLevelChanges[0]
+    const beforeLevel = previous.propertyLevels?.[tileId] ?? 0
+    const afterLevel = next.propertyLevels?.[tileId] ?? 0
+    const group = PROPERTY_GROUPS.get(tileId)
+    const groupTileIds = [...PROPERTY_GROUPS.entries()]
+      .filter(([, candidateGroup]) => candidateGroup === group)
+      .map(([candidateId]) => candidateId)
+    const levels = groupTileIds.map((candidateId) => previous.propertyLevels?.[candidateId] ?? 0)
+    const validAddition = afterLevel === beforeLevel + 1 && beforeLevel === Math.min(...levels)
+    const validRemoval = afterLevel === beforeLevel - 1 && beforeLevel === Math.max(...levels)
+    return previous.owners?.[tileId] === actorId && (validAddition || validRemoval)
+      ? null
+      : 'invalid_property_event_level'
+  }
   if (ownerChanges.length > 0) return 'invalid_property_transfer'
   if (levelChanges.length + mortgageChanges.length !== 1) return 'invalid_property_operation'
 
