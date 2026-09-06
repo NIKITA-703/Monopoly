@@ -5,6 +5,19 @@ import { extname, join, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { WebSocket, WebSocketServer } from 'ws'
+import { createAuditLog } from './audit-log.mjs'
+import {
+  validateAuctionTransition,
+  validateCasinoTransition,
+  validateGameState,
+  validateInitialGameState,
+  validateMoneyTransition,
+  validatePendingPaymentTransition,
+  validatePendingTileTransition,
+  validatePropertyTransition,
+  validatePurchaseTransition,
+  validateTradeResolution,
+} from './game-state-validation.mjs'
 
 const rootDirectory = fileURLToPath(new URL('..', import.meta.url))
 const dataDirectory = process.env.DATA_DIR ? normalize(process.env.DATA_DIR) : join(rootDirectory, 'data')
@@ -56,6 +69,15 @@ database.exec(`
   );
   CREATE INDEX IF NOT EXISTS landings_game_id_idx ON landings (game_id);
   CREATE INDEX IF NOT EXISTS landings_tile_id_idx ON landings (tile_id);
+
+  CREATE TABLE IF NOT EXISTS processed_requests (
+    session_token TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (session_token, request_id)
+  );
+  CREATE INDEX IF NOT EXISTS processed_requests_created_at_idx ON processed_requests (created_at);
 `)
 try { database.exec('ALTER TABLE games ADD COLUMN turn_key TEXT') } catch {}
 try { database.exec('ALTER TABLE games ADD COLUMN turn_deadline INTEGER') } catch {}
@@ -71,16 +93,37 @@ const passwordDigest = createHash('sha256').update(configuredPassword).digest()
 const accessCookieName = 'monopoly_access'
 const accessCookieValue = createHmac('sha256', sessionSecret).update('monopoly-access-v1').digest('hex')
 const clients = new Map()
+const clientPresence = new Map()
 let countdownTimer = null
 const timeoutControllers = new Map()
 const gameReturnTimers = new Map()
 const turnActionControllers = new Map()
+const movementAuthorizations = new Map()
+const rollAuthorizations = new Map()
+const idempotentMessageTypes = new Set([
+  'claim_seat',
+  'leave_seat',
+  'set_nickname',
+  'set_ready',
+  'turn_action_started',
+  'game_event',
+  'chat_message',
+  'game_snapshot',
+  'return_to_lobby',
+])
 const turnDuration = Math.max(5, Number(process.env.TURN_SECONDS ?? 70)) * 1000
 const tradeDecisionDuration = Math.max(5, Number(process.env.TRADE_SECONDS ?? 35)) * 1000
 const auctionDecisionDuration = Math.max(1, Number(process.env.AUCTION_SECONDS ?? 40)) * 1000
 const turnActionDuration = Math.max(10, Number(process.env.TURN_ACTION_SECONDS ?? 30)) * 1000
 const lobbyDisconnectDuration = Math.max(1, Number(process.env.LOBBY_DISCONNECT_SECONDS ?? 600)) * 1000
 const lobbyIdleDuration = Math.max(1, Number(process.env.LOBBY_IDLE_SECONDS ?? 900)) * 1000
+const auditLog = createAuditLog({
+  directory: dataDirectory,
+  debug: debugOnline,
+  maxBytes: Number(process.env.AUDIT_LOG_MAX_BYTES ?? 5 * 1024 * 1024),
+  maxFiles: Number(process.env.AUDIT_LOG_FILES ?? 5),
+  maxAgeDays: Number(process.env.AUDIT_LOG_MAX_AGE_DAYS ?? 14),
+})
 
 if (!process.env.GAME_PASSWORD) {
   console.warn('GAME_PASSWORD не задан. Для локальной разработки используется пароль: monopoly')
@@ -100,6 +143,19 @@ const send = (socket, message) => {
   if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
 }
 
+const claimRequest = (token, message) => {
+  if (!idempotentMessageTypes.has(message.type)) return { accepted: true, requestId: null }
+  if (message.requestId == null) return { accepted: true, requestId: null }
+  if (typeof message.requestId !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(message.requestId)) {
+    return { accepted: false, requestId: null, invalid: true }
+  }
+  const result = database.prepare(`
+    INSERT OR IGNORE INTO processed_requests (session_token, request_id, message_type, created_at)
+    VALUES (?, ?, ?, ?)
+  `).run(token, message.requestId, message.type, Date.now())
+  return { accepted: result.changes === 1, requestId: message.requestId, invalid: false }
+}
+
 const publicPlayerId = (token) => createHash('sha256').update(token).digest('hex').slice(0, 16)
 const tileNames = [
   'Старт', 'Balenciaga', 'Вопросик', 'Louis Vuitton', 'Налог', 'Tesla', 'Nike', 'Вопросик',
@@ -108,10 +164,6 @@ const tileNames = [
   'Bentley', 'Fanvue', 'Fansly', 'Apple TV+', 'OnlyFans', 'Полиция', 'Instagram', 'Reddit',
   'Вопросик', 'TikTok', 'Rolls-Royce', 'Алмазик', 'NASA', 'Вопросик', 'SpaceX',
 ]
-const trace = (event, details = {}) => {
-  if (debugOnline) console.log(JSON.stringify({ time: new Date().toISOString(), event, ...details }))
-}
-
 const roomRow = () => database.prepare('SELECT * FROM room WHERE id = 1').get()
 const sessionRows = () => database.prepare(`
   SELECT token, nickname, seat, ready, connected, last_seen
@@ -183,6 +235,53 @@ const timeoutCountsAsMissedTurn = (state) => {
   return Boolean(activePlayerId && !state?.auction && !state?.tradeDraft && getTurnActorId(state) === activePlayerId)
 }
 
+const summarizeGameState = (state) => {
+  if (!state || !Array.isArray(state.players)) return null
+  return {
+    turnSequence: state.turnSequence ?? 0,
+    phase: state.pendingPayment ? 'payment'
+      : state.pendingTileId !== null && state.pendingTileId !== undefined ? 'purchase'
+        : state.auction ? 'auction'
+          : state.casino ? 'casino'
+            : state.tradeDraft ? `trade:${state.tradeDraft.stage}`
+              : 'roll',
+    actorId: getTurnActorId(state),
+    players: state.players.map((player) => ({
+      id: player.id,
+      name: player.name,
+      money: player.money,
+      position: player.position,
+      eliminated: state.eliminatedPlayerIds?.includes(player.id) ?? false,
+    })),
+    owners: Object.keys(state.owners ?? {}).length,
+    pendingTileId: state.pendingTileId ?? null,
+    pendingPayment: state.pendingPayment
+      ? {
+          kind: state.pendingPayment.kind,
+          payerId: state.pendingPayment.payerId,
+          recipientId: state.pendingPayment.recipientId ?? null,
+          amount: state.pendingPayment.amount,
+        }
+      : null,
+    winnerId: state.winnerId ?? null,
+  }
+}
+
+const trace = (action, details = {}) => {
+  const storedGame = details.gameId
+    ? database.prepare('SELECT state_json FROM games WHERE id = ?').get(details.gameId)
+    : null
+  const storedState = storedGame?.state_json ? JSON.parse(storedGame.state_json) : null
+  const summary = summarizeGameState(storedState)
+  return auditLog.write(action, {
+    roomId: 1,
+    playerId: details.playerId ?? details.senderId ?? details.actorId ?? null,
+    turnSequence: details.turnSequence ?? summary?.turnSequence ?? null,
+    phase: details.phase ?? summary?.phase ?? null,
+    ...details,
+  })
+}
+
 const recordLanding = (gameId, state, event) => {
   const player = state?.players?.find((item) => item.id === event.playerId)
   if (!player) return
@@ -250,6 +349,40 @@ const normalizeEliminatedState = (state) => {
   return state
 }
 
+const settleBalancesForElimination = (previous, next, newlyEliminatedIds) => {
+  if (!previous || newlyEliminatedIds.length === 0) return
+  const eliminatedIds = new Set(newlyEliminatedIds)
+  const balances = new Map(previous.players.map((player) => [player.id, player.money]))
+  const payment = previous.pendingPayment
+  if (payment && eliminatedIds.has(payment.payerId) && payment.recipientId && balances.has(payment.recipientId)) {
+    const available = Math.min(balances.get(payment.payerId) ?? 0, payment.amount)
+    balances.set(payment.recipientId, (balances.get(payment.recipientId) ?? 0) + available)
+  }
+  for (const playerId of eliminatedIds) balances.set(playerId, 0)
+  next.players = next.players.map((player) => ({
+    ...player,
+    money: balances.get(player.id) ?? player.money,
+    ...(eliminatedIds.has(player.id) ? { lastDelta: 0 } : {}),
+  }))
+}
+
+const preservePendingServerRewards = (previous, next) => {
+  if (!previous) return
+  const pendingBookBonusKeys = new Set(previous.serverEconomy?.pendingBookBonusKeys ?? [])
+  for (const player of previous.players) {
+    const previousLap = previous.lapCounts?.[player.id] ?? 0
+    const nextLap = next.lapCounts?.[player.id] ?? 0
+    if (
+      previous.playerEffects?.[player.id]?.bookChallenge &&
+      !next.playerEffects?.[player.id]?.bookChallenge && nextLap > previousLap
+    ) pendingBookBonusKeys.add(`start:${player.id}:${nextLap}`)
+  }
+  next.serverEconomy = {
+    ...next.serverEconomy,
+    pendingBookBonusKeys: [...pendingBookBonusKeys].slice(-50),
+  }
+}
+
 const getTurnKey = (state) => JSON.stringify({
   turn: state?.turnSequence ?? 0,
   actor: getTurnActorId(state),
@@ -277,6 +410,8 @@ const returnGameToLobby = (gameId, reason) => {
   database.prepare('UPDATE sessions SET ready = 0, last_seen = ? WHERE seat IS NOT NULL').run(Date.now())
   timeoutControllers.delete(gameId)
   turnActionControllers.delete(gameId)
+  movementAuthorizations.delete(gameId)
+  rollAuthorizations.delete(gameId)
   trace('game_returned_to_lobby', { gameId, reason })
   broadcastLobby()
 }
@@ -310,6 +445,10 @@ const beginGame = () => {
   `).run(gameId)
   database.prepare('UPDATE sessions SET ready = 0 WHERE seat IS NOT NULL').run()
   countdownTimer = null
+  trace('game_started', {
+    gameId,
+    playerIds: participants.map((participant) => publicPlayerId(participant.token)),
+  })
   broadcastLobby()
 }
 
@@ -394,6 +533,7 @@ const authenticate = (socket, payload) => {
     if (client !== socket && clientToken === token) client.close(4002, 'Session opened in another tab')
   }
   clients.set(socket, token)
+  clientPresence.set(socket, { visible: false, updatedAt: now })
   send(socket, { type: 'auth_ok', token })
   broadcastLobby()
   const room = roomRow()
@@ -406,32 +546,11 @@ const handleLobbyMessage = (socket, token, message) => {
   const session = database.prepare('SELECT * FROM sessions WHERE token = ?').get(token)
   if (!session) return
 
-  if (message.type === 'turn_timeout_claim' && room.status === 'playing' && room.game_id) {
-    const game = database.prepare('SELECT state_json, turn_key FROM games WHERE id = ?').get(room.game_id)
-    const state = game?.state_json ? JSON.parse(game.state_json) : null
-    const controller = timeoutControllers.get(room.game_id)
-    const senderId = publicPlayerId(token)
-    const isParticipant = Boolean(state?.players?.some((player) => player.id === senderId))
-    if (
-      !controller || !isParticipant ||
-      controller.timeoutId !== message.timeoutId ||
-      controller.turnKey !== game?.turn_key
-    ) return
-
-    const now = Date.now()
-    if (controller.claimedBy && controller.claimExpiresAt > now) return
-    controller.claimedBy = senderId
-    controller.claimExpiresAt = now + 30000
-    timeoutControllers.set(room.game_id, controller)
-    const actorId = getTurnActorId(state)
-    send(socket, {
-      type: 'turn_timeout_granted',
-      gameId: room.game_id,
-      turnKey: controller.turnKey,
-      timeoutId: controller.timeoutId,
-      actorId,
+  if (message.type === 'client_presence') {
+    clientPresence.set(socket, {
+      visible: message.visible === true,
+      updatedAt: Date.now(),
     })
-    trace('turn_timeout_claimed', { gameId: room.game_id, actorId, handlerId: senderId, timeoutId: controller.timeoutId })
     return
   }
 
@@ -460,30 +579,38 @@ const handleLobbyMessage = (socket, token, message) => {
   }
 
   if (message.type === 'game_event' && room.status === 'playing' && room.game_id) {
-    const game = database.prepare('SELECT state_json FROM games WHERE id = ?').get(room.game_id)
+    const game = database.prepare('SELECT state_json, turn_key FROM games WHERE id = ?').get(room.game_id)
     const state = game?.state_json ? JSON.parse(game.state_json) : null
     const senderId = publicPlayerId(token)
-    if (!state || getTurnActorId(state) !== senderId) {
+    const expectedActorId = getTurnActorId(state)
+    const timeoutController = timeoutControllers.get(room.game_id)
+    const mayHandleTimeout = Boolean(
+      typeof message.timeoutId === 'string' &&
+      timeoutController?.timeoutId === message.timeoutId &&
+      timeoutController.turnKey === game?.turn_key &&
+      timeoutController.claimedBy === senderId,
+    )
+    if (!state || (expectedActorId !== senderId && !mayHandleTimeout)) {
       trace('game_event_rejected', {
         gameId: room.game_id,
         senderId,
-        expectedActorId: getTurnActorId(state),
+        expectedActorId,
         reason: state ? 'not_actor' : 'no_state',
       })
       return
     }
     const event = message.event
     const validDiceRoll = event?.kind === 'dice-roll'
-      && event.playerId === senderId
+      && event.playerId === expectedActorId
       && Array.isArray(event.dice) && event.dice.length === 2
       && event.dice.every((value) => Number.isInteger(value) && value >= 1 && value <= 6)
     const validMovement = event?.kind === 'movement'
-      && event.playerId === senderId
+      && event.playerId === expectedActorId
       && Number.isInteger(event.startPosition) && event.startPosition >= 0 && event.startPosition < 40
       && Number.isInteger(event.steps) && event.steps >= 1 && event.steps <= 40
       && (event.direction === 1 || event.direction === -1)
     const validDirectMovement = event?.kind === 'direct-movement'
-      && event.playerId === senderId
+      && event.playerId === expectedActorId
       && Number.isInteger(event.startPosition) && event.startPosition >= 0 && event.startPosition < 40
       && Number.isInteger(event.destinationPosition) && event.destinationPosition >= 0 && event.destinationPosition < 40
       && Number.isFinite(event.speedMultiplier) && event.speedMultiplier >= 0.5 && event.speedMultiplier <= 3
@@ -491,10 +618,41 @@ const handleLobbyMessage = (socket, token, message) => {
       trace('game_event_rejected', { gameId: room.game_id, senderId, reason: 'invalid_payload' })
       return
     }
+    if (validDiceRoll) {
+      rollAuthorizations.set(room.game_id, {
+        playerId: expectedActorId,
+        steps: event.dice[0] + event.dice[1],
+      })
+    }
+    if (validMovement) {
+      const player = state.players.find((item) => item.id === expectedActorId)
+      const authorizedRoll = rollAuthorizations.get(room.game_id)
+      if (
+        player?.position !== event.startPosition ||
+        authorizedRoll?.playerId !== expectedActorId || authorizedRoll.steps !== event.steps
+      ) {
+        trace('game_event_rejected', {
+          gameId: room.game_id,
+          senderId,
+          expectedActorId,
+          reason: 'invalid_movement_start',
+        })
+        return
+      }
+      const rawDestination = event.startPosition + event.steps * event.direction
+      const passedStart = event.direction === 1 && rawDestination >= 40
+      movementAuthorizations.set(room.game_id, {
+        playerId: expectedActorId,
+        destination: (rawDestination + 40 * 2) % 40,
+        passedStart,
+        lapNumber: (state.lapCounts?.[expectedActorId] ?? 0) + (passedStart ? 1 : 0),
+      })
+      rollAuthorizations.delete(room.game_id)
+    }
     const payload = { type: 'game_event', gameId: room.game_id, eventId: randomUUID(), senderId, event }
     if (validMovement || validDirectMovement) recordLanding(room.game_id, state, event)
     for (const client of clients.keys()) send(client, payload)
-    trace('game_event', { gameId: room.game_id, senderId, kind: event.kind })
+    trace('game_event', { gameId: room.game_id, eventId: payload.eventId, senderId, kind: event.kind })
     return
   }
 
@@ -511,8 +669,10 @@ const handleLobbyMessage = (socket, token, message) => {
       returnGameToLobby(room.game_id, `hidden_restart:${senderId}`)
       return
     }
+    const chatEventId = randomUUID()
+    const previousState = summarizeGameState(state)
     state.logs = [...(state.logs ?? []), {
-      id: randomUUID(),
+      id: chatEventId,
       playerId: senderId,
       text: `${player.name}: ${text}`,
       kind: 'chat',
@@ -522,14 +682,38 @@ const handleLobbyMessage = (socket, token, message) => {
     database.prepare('UPDATE games SET state_json = ?, updated_at = ? WHERE id = ?')
       .run(JSON.stringify(state), revision, room.game_id)
     broadcastGameState(room.game_id, state, revision, game.turn_deadline, 'server')
+    trace('chat_message', {
+      gameId: room.game_id,
+      eventId: chatEventId,
+      playerId: senderId,
+      before: previousState,
+      after: summarizeGameState(state),
+    })
     return
   }
 
   if (message.type === 'game_snapshot' && room.status === 'playing' && room.game_id) {
-    const state = normalizeEliminatedState(message.state)
+    const state = message.state
     if (!state || typeof state !== 'object' || !Array.isArray(state.players)) return
     const storedGame = database.prepare('SELECT state_json, updated_at, turn_key, turn_deadline FROM games WHERE id = ?').get(room.game_id)
     const storedState = storedGame?.state_json ? JSON.parse(storedGame.state_json) : null
+    // Клиент не может удалить отметки уже выданных сервером наград.
+    state.serverEconomy = storedState?.serverEconomy ?? { rewardKeys: [] }
+    preservePendingServerRewards(storedState, state)
+    const expectedPlayerIds = storedState?.players?.map((player) => player.id)
+      ?? sessionRows().filter((item) => item.seat !== null).map((item) => publicPlayerId(item.token))
+    const validationError = validateGameState(state, expectedPlayerIds) ??
+      (!storedState ? validateInitialGameState(state) : null)
+    if (validationError) {
+      const senderId = publicPlayerId(token)
+      trace('snapshot_rejected', {
+        gameId: room.game_id,
+        senderId,
+        reason: validationError,
+      })
+      send(socket, { type: 'action_error', message: 'Сервер отклонил некорректное состояние игры' })
+      return
+    }
     // Chat messages are appended by the server. A gameplay snapshot may have
     // been prepared just before a chat message arrived, so never let that
     // slightly older snapshot erase server-owned log entries.
@@ -558,6 +742,33 @@ const handleLobbyMessage = (socket, token, message) => {
       timeoutController.turnKey === storedGame?.turn_key &&
       timeoutController.claimedBy === senderId,
     )
+    const previousEliminatedIds = new Set(storedState?.eliminatedPlayerIds ?? [])
+    const submittedEliminatedIds = new Set(state.eliminatedPlayerIds ?? [])
+    const allowedNewEliminatedId = mayHandleTimeout
+      ? storedState?.players?.[storedState.activePlayerIndex]?.id
+      : senderId
+    const invalidElimination = !storedState
+      ? submittedEliminatedIds.size > 0
+      : [...previousEliminatedIds].some((id) => !submittedEliminatedIds.has(id)) ||
+        [...submittedEliminatedIds].some((id) =>
+          !previousEliminatedIds.has(id) && id !== allowedNewEliminatedId)
+    if (invalidElimination) {
+      trace('snapshot_rejected', {
+        gameId: room.game_id,
+        senderId,
+        reason: 'invalid_elimination',
+      })
+      send(socket, { type: 'action_error', message: 'Сервер отклонил некорректное исключение игрока' })
+      return
+    }
+    const newlyEliminatedIds = [...submittedEliminatedIds]
+      .filter((id) => !previousEliminatedIds.has(id))
+    settleBalancesForElimination(storedState, state, newlyEliminatedIds)
+    const remainingPlayerIds = state.players
+      .map((player) => player.id)
+      .filter((playerId) => !submittedEliminatedIds.has(playerId))
+    state.winnerId = remainingPlayerIds.length === 1 ? remainingPlayerIds[0] : null
+    normalizeEliminatedState(state)
     const deadlineExpired = Boolean(storedGame?.turn_deadline && storedGame.turn_deadline <= Date.now())
     if ((submittedTimeoutId && !mayHandleTimeout) || (deadlineExpired && !mayHandleTimeout)) {
       trace('snapshot_rejected', {
@@ -573,6 +784,36 @@ const handleLobbyMessage = (socket, token, message) => {
         senderId,
         expectedActorId: previousActorId,
       })
+      return
+    }
+    const tradeResolutionError = storedState
+      ? validateTradeResolution(storedState, state, senderId)
+      : null
+    if (tradeResolutionError) {
+      trace('snapshot_rejected', {
+        gameId: room.game_id,
+        senderId,
+        reason: tradeResolutionError,
+      })
+      send(socket, { type: 'action_error', message: 'Сервер отклонил некорректный обмен' })
+      return
+    }
+    const economyTransitionError = storedState
+      ? validatePurchaseTransition(storedState, state) ??
+        validateAuctionTransition(storedState, state) ??
+        validateCasinoTransition(storedState, state) ??
+        validatePendingPaymentTransition(storedState, state) ??
+        validatePendingTileTransition(storedState, state) ??
+        validatePropertyTransition(storedState, state, senderId, mayHandleTimeout) ??
+        validateMoneyTransition(storedState, state, senderId, movementAuthorizations.get(room.game_id))
+      : null
+    if (economyTransitionError) {
+      trace('snapshot_rejected', {
+        gameId: room.game_id,
+        senderId,
+        reason: economyTransitionError,
+      })
+      send(socket, { type: 'action_error', message: 'Сервер отклонил некорректную денежную операцию' })
       return
     }
 
@@ -644,8 +885,22 @@ const handleLobbyMessage = (socket, token, message) => {
     turnActionControllers.delete(room.game_id)
     database.prepare('UPDATE games SET state_json = ?, updated_at = ?, turn_key = ?, turn_deadline = ? WHERE id = ?')
       .run(JSON.stringify(state), revision, turnKey, turnDeadline, room.game_id)
+    const movementAuthorization = movementAuthorizations.get(room.game_id)
+    if (movementAuthorization) {
+      const rewardKey = `start:${movementAuthorization.playerId}:${movementAuthorization.lapNumber}`
+      if (!movementAuthorization.passedStart || state.serverEconomy?.rewardKeys?.includes(rewardKey)) {
+        movementAuthorizations.delete(room.game_id)
+      }
+    }
     broadcastGameState(room.game_id, state, revision, turnDeadline, senderId)
-    trace('snapshot', { gameId: room.game_id, revision, senderId, turnKey })
+    trace('snapshot', {
+      gameId: room.game_id,
+      revision,
+      playerId: senderId,
+      turnKey,
+      before: summarizeGameState(storedState),
+      after: summarizeGameState(state),
+    })
     if (state.winnerId) scheduleGameReturnToLobby(room.game_id)
     return
   }
@@ -776,7 +1031,7 @@ const server = createServer(async (request, response) => {
   }
 })
 
-const webSocketServer = new WebSocketServer({ server, path: '/ws' })
+const webSocketServer = new WebSocketServer({ server, path: '/ws', maxPayload: 1024 * 1024 })
 webSocketServer.on('connection', (socket, request) => {
   socket.hasAccess = hasAccessCookie(request)
   socket.isAlive = true
@@ -798,6 +1053,20 @@ webSocketServer.on('connection', (socket, request) => {
     }
 
     database.prepare('UPDATE sessions SET last_seen = ?, connected = 1 WHERE token = ?').run(Date.now(), token)
+    const request = claimRequest(token, message)
+    if (request.invalid) {
+      send(socket, { type: 'action_error', message: 'Некорректный идентификатор запроса' })
+      return
+    }
+    if (!request.accepted) {
+      trace('duplicate_request_ignored', {
+        gameId: roomRow().game_id ?? null,
+        playerId: publicPlayerId(token),
+        eventId: request.requestId,
+        messageType: message.type,
+      })
+      return
+    }
     handleLobbyMessage(socket, token, message)
   })
 
@@ -805,6 +1074,7 @@ webSocketServer.on('connection', (socket, request) => {
     clearTimeout(authTimeout)
     const token = clients.get(socket)
     clients.delete(socket)
+    clientPresence.delete(socket)
     if (token && ![...clients.values()].includes(token)) {
       const room = roomRow()
       database.prepare(`
@@ -853,6 +1123,11 @@ setInterval(() => {
 }, 1000).unref()
 
 setInterval(() => {
+  database.prepare('DELETE FROM processed_requests WHERE created_at < ?')
+    .run(Date.now() - 24 * 60 * 60 * 1000)
+}, 60 * 60 * 1000).unref()
+
+setInterval(() => {
   const room = roomRow()
   if (room.status !== 'playing' || !room.game_id) return
   const game = database.prepare('SELECT state_json, turn_key, turn_deadline FROM games WHERE id = ?').get(room.game_id)
@@ -868,23 +1143,54 @@ setInterval(() => {
   const participantSockets = [...clients.entries()].filter(([, token]) =>
     participantIds.has(publicPlayerId(token)))
   if (participantSockets.length === 0) return
+  const now = Date.now()
   const existingController = timeoutControllers.get(room.game_id)
   const controller = existingController?.turnKey === game.turn_key
     ? existingController
-    : { timeoutId: randomUUID(), turnKey: game.turn_key, lastSentAt: 0, claimedBy: null, claimExpiresAt: 0 }
-  if (controller.claimedBy && controller.claimExpiresAt > Date.now()) return
-  if (Date.now() - controller.lastSentAt < 2000) return
-  controller.lastSentAt = Date.now()
+    : {
+        timeoutId: randomUUID(),
+        turnKey: game.turn_key,
+        lastSentAt: 0,
+        claimedBy: null,
+        claimExpiresAt: 0,
+        attemptedHandlerIds: new Set(),
+      }
+  if (!(controller.attemptedHandlerIds instanceof Set)) controller.attemptedHandlerIds = new Set()
+  if (controller.claimedBy && controller.claimExpiresAt > now) return
+  if (controller.claimedBy) controller.attemptedHandlerIds.add(controller.claimedBy)
+  if (now - controller.lastSentAt < 1000) return
+
+  const orderedSockets = [...participantSockets].sort(([firstSocket], [secondSocket]) =>
+    Number(clientPresence.get(secondSocket)?.visible === true) -
+    Number(clientPresence.get(firstSocket)?.visible === true))
+  let handler = orderedSockets.find(([, token]) =>
+    !controller.attemptedHandlerIds.has(publicPlayerId(token)))
+  if (!handler) {
+    controller.attemptedHandlerIds.clear()
+    handler = orderedSockets[0]
+  }
+  if (!handler) return
+
+  const [handlerSocket, handlerToken] = handler
+  const handlerId = publicPlayerId(handlerToken)
+  controller.claimedBy = handlerId
+  controller.claimExpiresAt = now + 10000
+  controller.lastSentAt = now
   timeoutControllers.set(room.game_id, controller)
-  trace('turn_timeout', { gameId: room.game_id, actorId, timeoutId: controller.timeoutId })
-  const payload = {
-    type: 'turn_timeout',
+  trace('turn_timeout_assigned', {
+    gameId: room.game_id,
+    actorId,
+    handlerId,
+    handlerVisible: clientPresence.get(handlerSocket)?.visible === true,
+    timeoutId: controller.timeoutId,
+  })
+  send(handlerSocket, {
+    type: 'turn_timeout_granted',
     gameId: room.game_id,
     turnKey: game.turn_key,
     timeoutId: controller.timeoutId,
     actorId,
-  }
-  for (const [socket] of participantSockets) send(socket, payload)
+  })
 }, 500).unref()
 
 server.listen(port, host, () => {

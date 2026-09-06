@@ -87,6 +87,9 @@ AUCTION_SECONDS=40
 LOBBY_DISCONNECT_SECONDS=600
 LOBBY_IDLE_SECONDS=900
 DEBUG_ONLINE=0
+AUDIT_LOG_MAX_BYTES=5242880
+AUDIT_LOG_FILES=5
+AUDIT_LOG_MAX_AGE_DAYS=14
 DATA_DIR=./data
 ```
 
@@ -103,6 +106,9 @@ DATA_DIR=./data
 | `LOBBY_DISCONNECT_SECONDS` | Через сколько секунд отсутствия освобождается место игрока в лобби |
 | `LOBBY_IDLE_SECONDS` | Через сколько секунд без действий освобождается место подключённого игрока в лобби |
 | `DEBUG_ONLINE` | Подробные сетевые логи при значении `1` |
+| `AUDIT_LOG_MAX_BYTES` | Максимальный размер одного файла журнала игровых действий |
+| `AUDIT_LOG_FILES` | Количество файлов журнала, сохраняемых при ротации |
+| `AUDIT_LOG_MAX_AGE_DAYS` | Срок хранения ротированных файлов журнала в днях |
 | `DATA_DIR` | Каталог файла `monopoly.sqlite` |
 
 После изменения серверных переменных перезапустите `npm run dev:server`.
@@ -213,6 +219,9 @@ AUCTION_SECONDS=40
 LOBBY_DISCONNECT_SECONDS=600
 LOBBY_IDLE_SECONDS=900
 DEBUG_ONLINE=0
+AUDIT_LOG_MAX_BYTES=5242880
+AUDIT_LOG_FILES=5
+AUDIT_LOG_MAX_AGE_DAYS=14
 DATA_DIR=/var/lib/monopoly
 ```
 
@@ -427,6 +436,16 @@ sudo nginx -t
 sudo systemctl restart monopoly
 sudo journalctl -u monopoly -f
 ```
+
+Независимо от `DEBUG_ONLINE`, сервер сохраняет структурированный журнал игровых действий в `DATA_DIR/audit`. Файлы автоматически ограничиваются по размеру и количеству настройками `AUDIT_LOG_MAX_BYTES` и `AUDIT_LOG_FILES`. Пароли, cookie, токены сессий и секреты перед записью скрываются.
+
+Чтобы выгрузить записи одной партии в отдельный файл, укажите её `gameId`:
+
+```bash
+npm run logs:game -- GAME_ID > game-log.jsonl
+```
+
+Локальные файлы журнала и выгрузки находятся вне Git благодаря `.gitignore`.
 
 Если локальный клиент бесконечно показывает «Подключаемся…», проверьте, что одновременно запущены обе команды:
 

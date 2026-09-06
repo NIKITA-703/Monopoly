@@ -3,6 +3,11 @@ import type { LobbyState, OnlineGameEvent, OnlineSession, ServerMessage } from '
 import { playGameSound } from '../audio/gameAudio'
 
 const sessionStorageKey = 'monopoly.online.session'
+const persistentSessionStorageKey = 'monopoly.online.player-session'
+const repeatProtectedMessageTypes = new Set([
+  'claim_seat', 'leave_seat', 'set_nickname', 'set_ready', 'turn_action_started',
+  'game_event', 'chat_message', 'game_snapshot', 'return_to_lobby',
+])
 type GameStateMessage = Extract<ServerMessage, { type: 'game_state' }>
 const webSocketUrl = () => {
   const configuredUrl = import.meta.env.VITE_WS_URL
@@ -11,7 +16,7 @@ const webSocketUrl = () => {
   return `${protocol}//${window.location.host}/ws`
 }
 
-type ConnectionStatus = 'connecting' | 'password' | 'online' | 'offline'
+type ConnectionStatus = 'connecting' | 'password' | 'online' | 'offline' | 'replaced'
 
 export function useOnlineLobby() {
   const socketRef = useRef<WebSocket | null>(null)
@@ -28,6 +33,7 @@ export function useOnlineLobby() {
   const lastImmediateTurnSoundRef = useRef<string | null>(null)
   const lastImmediateTradeSoundRef = useRef<string | null>(null)
   const lastImmediateAuctionSoundRef = useRef<string | null>(null)
+  const recentRequestsRef = useRef(new Map<string, { requestId: string; sentAt: number }>())
   const [status, setStatus] = useState<ConnectionStatus>('connecting')
   const [lobby, setLobby] = useState<LobbyState | null>(null)
   const [session, setSession] = useState<OnlineSession | null>(null)
@@ -39,12 +45,32 @@ export function useOnlineLobby() {
 
   const send = useCallback((message: Record<string, unknown>) => {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify(message))
+      const now = Date.now()
+      const messageType = typeof message.type === 'string' ? message.type : ''
+      const repeatKey = repeatProtectedMessageTypes.has(messageType) ? JSON.stringify(message) : ''
+      const recentRequest = repeatKey ? recentRequestsRef.current.get(repeatKey) : null
+      const requestId = typeof message.requestId === 'string'
+        ? message.requestId
+        : recentRequest && now - recentRequest.sentAt < 750
+          ? recentRequest.requestId
+          : crypto.randomUUID()
+      if (repeatKey) {
+        recentRequestsRef.current.set(repeatKey, { requestId, sentAt: now })
+        if (recentRequestsRef.current.size > 100) {
+          const oldestKey = recentRequestsRef.current.keys().next().value
+          if (oldestKey) recentRequestsRef.current.delete(oldestKey)
+        }
+      }
+      socketRef.current.send(JSON.stringify({
+        ...message,
+        requestId,
+      }))
     }
   }, [])
 
   useEffect(() => {
     let disposed = false
+    let replacedByAnotherTab = false
     let reconnectDelay = 500
     const applyDeferredStateWithoutAnimation = () => {
       if (document.visibilityState !== 'hidden') return
@@ -57,18 +83,29 @@ export function useOnlineLobby() {
         setGameState(deferredState)
       }
     }
-    document.addEventListener('visibilitychange', applyDeferredStateWithoutAnimation)
-    // Старые версии хранили один токен на весь браузер. Из-за этого две вкладки
-    // управляли одним игроком. Переносим старый токен в текущую вкладку один раз,
-    // после чего каждая новая вкладка будет получать уже собственную сессию.
-    const legacyToken = window.localStorage.getItem(sessionStorageKey)
-    if (!window.sessionStorage.getItem(sessionStorageKey) && legacyToken) {
-      window.sessionStorage.setItem(sessionStorageKey, legacyToken)
+    const reportPresence = () => {
+      if (socketRef.current?.readyState !== WebSocket.OPEN) return
+      socketRef.current.send(JSON.stringify({
+        type: 'client_presence',
+        visible: document.visibilityState === 'visible',
+      }))
+    }
+    const handleVisibilityChange = () => {
+      applyDeferredStateWithoutAnimation()
+      reportPresence()
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    // sessionStorage сохраняет владельца текущей вкладки, а localStorage позволяет
+    // вернуть того же игрока после закрытия вкладки или восстановления Chrome.
+    const durableToken = window.localStorage.getItem(persistentSessionStorageKey)
+      ?? window.localStorage.getItem(sessionStorageKey)
+    if (!window.sessionStorage.getItem(sessionStorageKey) && durableToken) {
+      window.sessionStorage.setItem(sessionStorageKey, durableToken)
     }
     window.localStorage.removeItem(sessionStorageKey)
 
     const connect = () => {
-      if (disposed) return
+      if (disposed || replacedByAnotherTab) return
       setStatus((current) => current === 'password' ? current : 'connecting')
       const socket = new WebSocket(webSocketUrl())
       socketRef.current = socket
@@ -76,6 +113,7 @@ export function useOnlineLobby() {
       socket.addEventListener('open', () => {
         reconnectDelay = 500
         const token = window.sessionStorage.getItem(sessionStorageKey)
+          ?? window.localStorage.getItem(persistentSessionStorageKey)
         if (token) {
           passwordScreenRef.current = false
           socket.send(JSON.stringify({ type: 'auth', token }))
@@ -94,14 +132,20 @@ export function useOnlineLobby() {
         if (message.type === 'auth_ok') {
           passwordScreenRef.current = false
           window.sessionStorage.setItem(sessionStorageKey, message.token)
+          window.localStorage.setItem(persistentSessionStorageKey, message.token)
           passwordRef.current = ''
           setError('')
           setStatus('online')
+          socket.send(JSON.stringify({
+            type: 'client_presence',
+            visible: document.visibilityState === 'visible',
+          }))
           return
         }
         if (message.type === 'auth_error') {
           passwordScreenRef.current = true
           window.sessionStorage.removeItem(sessionStorageKey)
+          window.localStorage.removeItem(persistentSessionStorageKey)
           setError(message.message)
           setStatus('password')
           return
@@ -224,10 +268,6 @@ export function useOnlineLobby() {
           setTurnDeadline(message.turnDeadline)
           return
         }
-        if (message.type === 'turn_timeout') {
-          socket.send(JSON.stringify({ type: 'turn_timeout_claim', timeoutId: message.timeoutId }))
-          return
-        }
         if (message.type === 'turn_timeout_granted') {
           pendingTimeoutIdRef.current = message.timeoutId
           setTurnTimeout({ timeoutId: message.timeoutId, actorId: message.actorId })
@@ -258,10 +298,10 @@ export function useOnlineLobby() {
         deferredGameStateRef.current = null
         setGameEvents([])
         if (event.code === 4002) {
-          window.sessionStorage.removeItem(sessionStorageKey)
-          sessionEstablishedRef.current = false
-          playerIdRef.current = null
-          setSession(null)
+          replacedByAnotherTab = true
+          setError('Эта игровая сессия открыта в другой вкладке')
+          setStatus('replaced')
+          return
         }
         setStatus(passwordScreenRef.current ? 'password' : sessionEstablishedRef.current ? 'offline' : 'connecting')
         reconnectTimerRef.current = window.setTimeout(connect, reconnectDelay)
@@ -272,7 +312,7 @@ export function useOnlineLobby() {
     connect()
     return () => {
       disposed = true
-      document.removeEventListener('visibilitychange', applyDeferredStateWithoutAnimation)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
       socketRef.current?.close()
     }
@@ -348,6 +388,10 @@ export function useOnlineLobby() {
     beginTurnAction: () => send({ type: 'turn_action_started' }),
     sendChatMessage: (text: string) => send({ type: 'chat_message', text }),
     returnToLobby: () => send({ type: 'return_to_lobby' }),
-    sendGameEvent: (event: OnlineGameEvent) => send({ type: 'game_event', event }),
+    sendGameEvent: (event: OnlineGameEvent) => send({
+      type: 'game_event',
+      event,
+      ...(pendingTimeoutIdRef.current ? { timeoutId: pendingTimeoutIdRef.current } : {}),
+    }),
   }
 }

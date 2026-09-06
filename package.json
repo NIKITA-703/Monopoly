@@ -9,6 +9,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "reset:session": "node --env-file-if-exists=.env server/reset-session.mjs",
+    "logs:game": "node --env-file-if-exists=.env server/export-game-log.mjs",
     "test:online": "node test/online.integration.mjs",
     "preview": "vite preview",
     "start": "node --env-file-if-exists=.env server/index.mjs"
