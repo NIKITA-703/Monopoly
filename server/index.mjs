@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { extname, join, normalize } from 'node:path'
@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { WebSocket, WebSocketServer } from 'ws'
 import { createAuditLog } from './audit-log.mjs'
+import { createRoomStore, installRoomSchema } from './room-store.mjs'
 import {
   validateAuctionTransition,
   validateCasinoTransition,
@@ -82,16 +83,14 @@ database.exec(`
 try { database.exec('ALTER TABLE games ADD COLUMN turn_key TEXT') } catch {}
 try { database.exec('ALTER TABLE games ADD COLUMN turn_deadline INTEGER') } catch {}
 try { database.exec("ALTER TABLE landings ADD COLUMN tile_name TEXT NOT NULL DEFAULT ''") } catch {}
+installRoomSchema(database)
+const roomStore = createRoomStore(database)
 database.prepare('UPDATE sessions SET connected = 0').run()
 
 const port = Number(process.env.PORT ?? 3001)
 const host = process.env.HOST ?? '0.0.0.0'
-const configuredPassword = process.env.GAME_PASSWORD ?? 'monopoly'
-const sessionSecret = process.env.SESSION_SECRET ?? configuredPassword
+const legacySingleRoom = process.env.LEGACY_SINGLE_ROOM === '1'
 const debugOnline = process.env.DEBUG_ONLINE === '1'
-const passwordDigest = createHash('sha256').update(configuredPassword).digest()
-const accessCookieName = 'monopoly_access'
-const accessCookieValue = createHmac('sha256', sessionSecret).update('monopoly-access-v1').digest('hex')
 const clients = new Map()
 const clientPresence = new Map()
 let countdownTimer = null
@@ -105,6 +104,10 @@ const idempotentMessageTypes = new Set([
   'leave_seat',
   'set_nickname',
   'set_ready',
+  'start_game',
+  'create_room',
+  'join_room',
+  'leave_room',
   'turn_action_started',
   'game_event',
   'chat_message',
@@ -124,10 +127,6 @@ const auditLog = createAuditLog({
   maxFiles: Number(process.env.AUDIT_LOG_FILES ?? 5),
   maxAgeDays: Number(process.env.AUDIT_LOG_MAX_AGE_DAYS ?? 14),
 })
-
-if (!process.env.GAME_PASSWORD) {
-  console.warn('GAME_PASSWORD не задан. Для локальной разработки используется пароль: monopoly')
-}
 
 const mimeTypes = {
   '.css': 'text/css; charset=utf-8',
@@ -197,10 +196,91 @@ const lobbyState = () => {
 }
 
 const broadcastLobby = () => {
+  if (!legacySingleRoom) return
   const lobby = lobbyState()
   for (const [socket, token] of clients) {
+    if (roomStore.getMembership(token)) continue
     const session = database.prepare('SELECT nickname, seat, ready FROM sessions WHERE token = ?').get(token)
     send(socket, { type: 'lobby', lobby, session: session ? { ...session, playerId: publicPlayerId(token) } : null })
+  }
+}
+
+const multiplayerLobbyState = (roomId) => {
+  const room = roomStore.getRoom(roomId)
+  if (!room) return null
+  const members = roomStore.listMembers(roomId)
+  const sessions = new Map(members.map((member) => {
+    const session = database.prepare(`
+      SELECT nickname, connected, last_seen FROM sessions WHERE token = ?
+    `).get(member.session_token)
+    return [member.session_token, session]
+  }))
+  const occupied = new Map(members.map((member) => [member.seat, member]))
+  return {
+    id: room.id,
+    code: room.code,
+    name: room.name,
+    visibility: room.visibility,
+    status: room.status,
+    gameId: room.game_id ?? null,
+    leaderPlayerId: publicPlayerId(room.leader_token),
+    countdownEndsAt: null,
+    seats: Array.from({ length: 5 }, (_, seat) => {
+      const member = occupied.get(seat)
+      const session = member ? sessions.get(member.session_token) : null
+      return member && session
+        ? {
+            seat,
+            playerId: publicPlayerId(member.session_token),
+            nickname: session.nickname,
+            ready: Boolean(member.ready),
+            connected: Boolean(session.connected),
+            disconnectedExpiresAt: session.connected ? null : session.last_seen + lobbyDisconnectDuration,
+            idleExpiresAt: session.connected ? member.last_active_at + lobbyIdleDuration : null,
+          }
+        : { seat, nickname: null, ready: false, connected: false, disconnectedExpiresAt: null, idleExpiresAt: null }
+    }),
+  }
+}
+
+const sendMultiplayerLobby = (socket, token, roomId) => {
+  const lobby = multiplayerLobbyState(roomId)
+  const member = roomStore.getMembership(token)
+  const session = database.prepare('SELECT nickname FROM sessions WHERE token = ?').get(token)
+  if (!lobby || !member || member.room_id !== roomId || !session) return
+  send(socket, {
+    type: 'lobby',
+    lobby,
+    session: {
+      nickname: session.nickname,
+      seat: member.seat,
+      ready: Boolean(member.ready),
+      playerId: publicPlayerId(token),
+      isLeader: lobby.leaderPlayerId === publicPlayerId(token),
+    },
+  })
+}
+
+const broadcastMultiplayerLobby = (roomId) => {
+  for (const [socket, token] of clients) {
+    if (roomStore.getMembership(token)?.room_id === roomId) sendMultiplayerLobby(socket, token, roomId)
+  }
+}
+
+const roomDirectoryState = () => roomStore.listPublicRooms().map((room) => ({
+  id: room.id,
+  code: room.code,
+  name: room.name,
+  status: room.status,
+  playerCount: Number(room.player_count),
+  capacity: 5,
+}))
+
+const sendRoomHome = (socket) => send(socket, { type: 'room_home', rooms: roomDirectoryState() })
+
+const broadcastRoomHome = () => {
+  for (const [socket, token] of clients) {
+    if (!roomStore.getMembership(token)) sendRoomHome(socket)
   }
 }
 
@@ -216,10 +296,20 @@ const sendStoredGameState = (socket, gameId) => {
   })
 }
 
-const broadcastGameState = (gameId, state, revision, turnDeadline, senderId = null) => {
-  for (const socket of clients.keys()) {
-    send(socket, { type: 'game_state', gameId, revision, turnDeadline, senderId, state })
+const tokenBelongsToGame = (token, gameId) => {
+  const membership = roomStore.getMembership(token)
+  if (membership) return roomStore.getRoom(membership.room_id)?.game_id === gameId
+  return legacySingleRoom && roomRow().game_id === gameId
+}
+
+const broadcastToGame = (gameId, message) => {
+  for (const [socket, token] of clients) {
+    if (tokenBelongsToGame(token, gameId)) send(socket, message)
   }
+}
+
+const broadcastGameState = (gameId, state, revision, turnDeadline, senderId = null) => {
+  broadcastToGame(gameId, { type: 'game_state', gameId, revision, turnDeadline, senderId, state })
 }
 
 const getTurnActorId = (state) => {
@@ -406,20 +496,33 @@ const returnGameToLobby = (gameId, reason) => {
   if (returnTimer) clearTimeout(returnTimer)
   gameReturnTimers.delete(gameId)
   database.prepare('UPDATE games SET status = ? WHERE id = ?').run('finished', gameId)
-  database.prepare("UPDATE room SET status = 'lobby', game_id = NULL, countdown_ends_at = NULL WHERE id = 1").run()
-  database.prepare('UPDATE sessions SET ready = 0, last_seen = ? WHERE seat IS NOT NULL').run(Date.now())
+  const multiplayerRoom = roomStore.findRoomByGameId(gameId)
+  if (multiplayerRoom) {
+    database.prepare("UPDATE rooms SET status = 'lobby', game_id = NULL, updated_at = ? WHERE id = ?")
+      .run(Date.now(), multiplayerRoom.id)
+    database.prepare('UPDATE room_members SET ready = 0, last_active_at = ? WHERE room_id = ?')
+      .run(Date.now(), multiplayerRoom.id)
+  } else {
+    database.prepare("UPDATE room SET status = 'lobby', game_id = NULL, countdown_ends_at = NULL WHERE id = 1").run()
+    database.prepare('UPDATE sessions SET ready = 0, last_seen = ? WHERE seat IS NOT NULL').run(Date.now())
+  }
   timeoutControllers.delete(gameId)
   turnActionControllers.delete(gameId)
   movementAuthorizations.delete(gameId)
   rollAuthorizations.delete(gameId)
   trace('game_returned_to_lobby', { gameId, reason })
-  broadcastLobby()
+  if (multiplayerRoom) {
+    broadcastMultiplayerLobby(multiplayerRoom.id)
+    broadcastRoomHome()
+  } else {
+    broadcastLobby()
+  }
 }
 
 const scheduleGameReturnToLobby = (gameId) => {
   if (gameReturnTimers.has(gameId)) return
   const returnTimer = setTimeout(() => {
-    const currentRoom = roomRow()
+    const currentRoom = roomStore.findRoomByGameId(gameId) ?? roomRow()
     if (currentRoom.status === 'playing' && currentRoom.game_id === gameId) {
       returnGameToLobby(gameId, 'winner_detected')
     }
@@ -452,6 +555,48 @@ const beginGame = () => {
   broadcastLobby()
 }
 
+const beginMultiplayerGame = (roomId, leaderToken) => {
+  const room = roomStore.getRoom(roomId)
+  if (!room || room.status !== 'lobby') throw new Error('room_not_ready')
+  if (room.leader_token !== leaderToken) throw new Error('leader_only')
+
+  const participants = roomStore.listMembers(roomId).map((member) => ({
+    ...member,
+    session: database.prepare('SELECT nickname, connected FROM sessions WHERE token = ?').get(member.session_token),
+  }))
+  if (
+    participants.length < 2 ||
+    participants.some((participant) => !participant.ready || !participant.session?.connected)
+  ) throw new Error('room_not_ready')
+
+  const now = Date.now()
+  const gameId = randomUUID()
+  database.exec('BEGIN IMMEDIATE')
+  try {
+    database.prepare('INSERT INTO games (id, status, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run(gameId, 'playing', now, now)
+    const update = database.prepare(`
+      UPDATE rooms SET status = 'playing', game_id = ?, updated_at = ?
+      WHERE id = ? AND status = 'lobby' AND leader_token = ?
+    `).run(gameId, now, roomId, leaderToken)
+    if (update.changes !== 1) throw new Error('room_not_ready')
+    database.prepare('UPDATE room_members SET ready = 0, last_active_at = ? WHERE room_id = ?')
+      .run(now, roomId)
+    database.exec('COMMIT')
+  } catch (error) {
+    database.exec('ROLLBACK')
+    throw error
+  }
+
+  trace('game_started', {
+    roomId,
+    gameId,
+    playerIds: participants.map((participant) => publicPlayerId(participant.session_token)),
+  })
+  broadcastMultiplayerLobby(roomId)
+  broadcastRoomHome()
+}
+
 const reconcileCountdown = () => {
   const room = roomRow()
   if (room.status !== 'lobby') return
@@ -471,52 +616,11 @@ const reconcileCountdown = () => {
   broadcastLobby()
 }
 
-const verifyPassword = (value) => {
-  const candidate = createHash('sha256').update(String(value ?? '')).digest()
-  return candidate.length === passwordDigest.length && timingSafeEqual(candidate, passwordDigest)
-}
-
-const parseCookies = (header = '') => Object.fromEntries(
-  String(header).split(';').flatMap((part) => {
-    const separator = part.indexOf('=')
-    if (separator < 0) return []
-    return [[part.slice(0, separator).trim(), decodeURIComponent(part.slice(separator + 1).trim())]]
-  }),
-)
-
-const hasAccessCookie = (request) => {
-  const candidate = parseCookies(request.headers.cookie)[accessCookieName] ?? ''
-  const candidateBuffer = Buffer.from(candidate)
-  const expectedBuffer = Buffer.from(accessCookieValue)
-  return candidateBuffer.length === expectedBuffer.length && timingSafeEqual(candidateBuffer, expectedBuffer)
-}
-
-const readJsonBody = (request, maximumBytes = 4096) => new Promise((resolve, reject) => {
-  let body = ''
-  request.setEncoding('utf8')
-  request.on('data', (chunk) => {
-    body += chunk
-    if (body.length > maximumBytes) reject(new Error('request_too_large'))
-  })
-  request.on('end', () => {
-    try {
-      resolve(JSON.parse(body || '{}'))
-    } catch {
-      reject(new Error('invalid_json'))
-    }
-  })
-  request.on('error', reject)
-})
-
 const authenticate = (socket, payload) => {
   const requestedToken = typeof payload.token === 'string' ? payload.token : ''
   const existing = requestedToken
     ? database.prepare('SELECT token FROM sessions WHERE token = ?').get(requestedToken)
     : null
-  if (!existing && !socket.hasAccess && !verifyPassword(payload.password)) {
-    send(socket, { type: 'auth_error', message: 'Неверный пароль' })
-    return false
-  }
   const token = existing ? requestedToken : randomUUID()
   const now = Date.now()
 
@@ -535,15 +639,182 @@ const authenticate = (socket, payload) => {
   clients.set(socket, token)
   clientPresence.set(socket, { visible: false, updatedAt: now })
   send(socket, { type: 'auth_ok', token })
-  broadcastLobby()
-  const room = roomRow()
-  if (room.status === 'playing' && room.game_id) sendStoredGameState(socket, room.game_id)
+  const membership = roomStore.getMembership(token)
+  if (membership) {
+    broadcastMultiplayerLobby(membership.room_id)
+    const multiplayerRoom = roomStore.getRoom(membership.room_id)
+    if (multiplayerRoom?.status === 'playing' && multiplayerRoom.game_id) {
+      sendStoredGameState(socket, multiplayerRoom.game_id)
+    }
+  } else {
+    sendRoomHome(socket)
+    if (legacySingleRoom) {
+      broadcastLobby()
+      const room = roomRow()
+      if (room.status === 'playing' && room.game_id) sendStoredGameState(socket, room.game_id)
+    }
+  }
   return true
 }
 
-const handleLobbyMessage = (socket, token, message) => {
-  const room = roomRow()
+const roomActionMessages = {
+  already_in_room: 'Сначала выйдите из текущей комнаты',
+  invalid_room_password: 'Неверный пароль комнаты',
+  invalid_session: 'Сессия игрока недействительна',
+  invalid_visibility: 'Некорректный тип комнаты',
+  room_already_playing: 'Игра в этой комнате уже началась',
+  room_code_unavailable: 'Не удалось создать код комнаты. Попробуйте ещё раз',
+  room_full: 'В комнате уже пять игроков',
+  room_not_found: 'Комната с таким кодом не найдена',
+  room_password_required: 'Для закрытой комнаты задайте пароль',
+  leader_only: 'Только лидер комнаты может начать игру',
+  room_not_ready: 'Для запуска нужны минимум два подключённых и готовых игрока',
+}
+
+const handleRoomDirectoryMessage = (socket, token, message) => {
+  if (!['create_room', 'join_room', 'leave_room'].includes(message.type)) return false
+  try {
+    if (message.type === 'leave_room') {
+      const result = roomStore.leaveRoom(token)
+      auditLog.write('room_left', {
+        roomId: result.roomId,
+        playerId: publicPlayerId(token),
+        roomClosed: result.closed,
+        leaderPlayerId: result.newLeaderToken ? publicPlayerId(result.newLeaderToken) : null,
+      })
+      sendRoomHome(socket)
+      if (result.roomId && !result.closed) broadcastMultiplayerLobby(result.roomId)
+      broadcastRoomHome()
+      return true
+    }
+    const room = message.type === 'create_room'
+      ? roomStore.createRoom({
+          leaderToken: token,
+          name: message.name,
+          visibility: message.visibility,
+          password: message.password,
+        })
+      : roomStore.findRoomByCode(message.code)
+    const membership = message.type === 'create_room'
+      ? roomStore.getMembership(token)
+      : roomStore.joinRoom({ sessionToken: token, code: message.code, password: message.password })
+    const roomId = membership?.room_id ?? room?.id
+    if (!roomId) throw new Error('room_not_found')
+    auditLog.write(message.type === 'create_room' ? 'room_created' : 'room_joined', {
+      roomId,
+      playerId: publicPlayerId(token),
+    })
+    broadcastMultiplayerLobby(roomId)
+    broadcastRoomHome()
+  } catch (error) {
+    send(socket, {
+      type: 'action_error',
+      message: roomActionMessages[error?.message] ?? 'Не удалось выполнить действие с комнатой',
+      code: error?.message ?? 'room_action_failed',
+    })
+  }
+  return true
+}
+
+const handleMultiplayerLobbyMessage = (socket, token, message, membership) => {
+  const room = roomStore.getRoom(membership.room_id)
   const session = database.prepare('SELECT * FROM sessions WHERE token = ?').get(token)
+  if (!room || !session) return
+
+  if (message.type === 'client_presence') {
+    clientPresence.set(socket, {
+      visible: message.visible === true,
+      updatedAt: Date.now(),
+    })
+    return
+  }
+
+  if (room.status !== 'lobby') return
+  const now = Date.now()
+  let lobbyChanged = false
+
+  if (message.type === 'start_game') {
+    try {
+      beginMultiplayerGame(room.id, token)
+    } catch (error) {
+      send(socket, {
+        type: 'action_error',
+        message: roomActionMessages[error?.message] ?? 'Не удалось начать игру',
+        code: error?.message ?? 'start_game_failed',
+      })
+    }
+    return
+  }
+
+  if (message.type === 'claim_seat') {
+    const seat = Number(message.seat)
+    if (!Number.isInteger(seat) || seat < 0 || seat > 4) return
+    const occupant = database.prepare(`
+      SELECT session_token FROM room_members WHERE room_id = ? AND seat = ?
+    `).get(room.id, seat)
+    if (occupant && occupant.session_token !== token) {
+      send(socket, { type: 'action_error', message: 'Это место уже занято' })
+      return
+    }
+    database.prepare(`
+      UPDATE room_members SET seat = ?, ready = 0, last_active_at = ?
+      WHERE room_id = ? AND session_token = ?
+    `).run(seat, now, room.id, token)
+    lobbyChanged = true
+  }
+
+  if (message.type === 'set_nickname') {
+    const nickname = String(message.nickname ?? '').trim().replace(/\s+/g, ' ').slice(0, 20)
+    if (nickname.length < 1) {
+      send(socket, { type: 'action_error', message: 'Ник не может быть пустым' })
+      return
+    }
+    database.prepare('UPDATE sessions SET nickname = ?, last_seen = ? WHERE token = ?')
+      .run(nickname, now, token)
+    database.prepare(`
+      UPDATE room_members SET ready = 0, last_active_at = ?
+      WHERE room_id = ? AND session_token = ?
+    `).run(now, room.id, token)
+    lobbyChanged = true
+  }
+
+  if (message.type === 'set_ready') {
+    database.prepare(`
+      UPDATE room_members SET ready = ?, last_active_at = ?
+      WHERE room_id = ? AND session_token = ?
+    `).run(message.ready ? 1 : 0, now, room.id, token)
+    trace('room_lobby_ready_changed', {
+      roomId: room.id,
+      playerId: publicPlayerId(token),
+      ready: Boolean(message.ready),
+    })
+    lobbyChanged = true
+  }
+
+  if (message.type === 'lobby_activity') {
+    database.prepare(`
+      UPDATE room_members SET last_active_at = ? WHERE room_id = ? AND session_token = ?
+    `).run(now, room.id, token)
+    lobbyChanged = true
+  }
+
+  if (lobbyChanged) broadcastMultiplayerLobby(room.id)
+}
+
+const handleLobbyMessage = (socket, token, message) => {
+  if (handleRoomDirectoryMessage(socket, token, message)) return
+  const membership = roomStore.getMembership(token)
+  const membershipRoom = membership ? roomStore.getRoom(membership.room_id) : null
+  if (membership) {
+    handleMultiplayerLobbyMessage(socket, token, message, membership)
+    if (membershipRoom?.status === 'lobby' || message.type === 'client_presence') return
+  }
+  if (!membership && !legacySingleRoom) return
+  const room = membershipRoom ?? roomRow()
+  const storedSession = database.prepare('SELECT * FROM sessions WHERE token = ?').get(token)
+  const session = membership && storedSession
+    ? { ...storedSession, seat: membership.seat, ready: membership.ready }
+    : storedSession
   if (!session) return
 
   if (message.type === 'client_presence') {
@@ -571,9 +842,7 @@ const handleLobbyMessage = (socket, token, message) => {
     turnActionControllers.set(room.game_id, { turnKey: game.turn_key, playerId: senderId })
     timeoutControllers.delete(room.game_id)
     database.prepare('UPDATE games SET turn_deadline = ? WHERE id = ?').run(actionDeadline, room.game_id)
-    for (const client of clients.keys()) {
-      send(client, { type: 'turn_deadline', gameId: room.game_id, turnDeadline: actionDeadline })
-    }
+    broadcastToGame(room.game_id, { type: 'turn_deadline', gameId: room.game_id, turnDeadline: actionDeadline })
     trace('turn_action_started', { gameId: room.game_id, senderId, turnKey: game.turn_key })
     return
   }
@@ -651,7 +920,7 @@ const handleLobbyMessage = (socket, token, message) => {
     }
     const payload = { type: 'game_event', gameId: room.game_id, eventId: randomUUID(), senderId, event }
     if (validMovement || validDirectMovement) recordLanding(room.game_id, state, event)
-    for (const client of clients.keys()) send(client, payload)
+    broadcastToGame(room.game_id, payload)
     trace('game_event', { gameId: room.game_id, eventId: payload.eventId, senderId, kind: event.kind })
     return
   }
@@ -701,7 +970,9 @@ const handleLobbyMessage = (socket, token, message) => {
     state.serverEconomy = storedState?.serverEconomy ?? { rewardKeys: [] }
     preservePendingServerRewards(storedState, state)
     const expectedPlayerIds = storedState?.players?.map((player) => player.id)
-      ?? sessionRows().filter((item) => item.seat !== null).map((item) => publicPlayerId(item.token))
+      ?? (membership
+        ? roomStore.listMembers(room.id).map((item) => publicPlayerId(item.session_token))
+        : sessionRows().filter((item) => item.seat !== null).map((item) => publicPlayerId(item.token)))
     const validationError = validateGameState(state, expectedPlayerIds) ??
       (!storedState ? validateInitialGameState(state) : null)
     if (validationError) {
@@ -963,32 +1234,6 @@ const server = createServer(async (request, response) => {
     return
   }
 
-  if (request.url === '/api/access' && request.method === 'POST') {
-    try {
-      const body = await readJsonBody(request)
-      if (!verifyPassword(body.password)) {
-        response.writeHead(401, {
-          'content-type': 'application/json; charset=utf-8',
-          'cache-control': 'no-store',
-        })
-        response.end(JSON.stringify({ ok: false, message: 'Неверный пароль' }))
-        return
-      }
-      const forwardedProtocol = String(request.headers['x-forwarded-proto'] ?? '')
-      const secure = request.socket.encrypted || forwardedProtocol.split(',')[0].trim() === 'https'
-      response.writeHead(200, {
-        'content-type': 'application/json; charset=utf-8',
-        'cache-control': 'no-store',
-        'set-cookie': `${accessCookieName}=${encodeURIComponent(accessCookieValue)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000${secure ? '; Secure' : ''}`,
-      })
-      response.end(JSON.stringify({ ok: true }))
-    } catch {
-      response.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-      response.end(JSON.stringify({ ok: false, message: 'Некорректный запрос' }))
-    }
-    return
-  }
-
   if (request.url === '/api/health') {
     response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
     response.end(JSON.stringify({ ok: true, version: appVersion }))
@@ -1032,8 +1277,7 @@ const server = createServer(async (request, response) => {
 })
 
 const webSocketServer = new WebSocketServer({ server, path: '/ws', maxPayload: 1024 * 1024 })
-webSocketServer.on('connection', (socket, request) => {
-  socket.hasAccess = hasAccessCookie(request)
+webSocketServer.on('connection', (socket) => {
   socket.isAlive = true
   socket.on('pong', () => { socket.isAlive = true })
   const authTimeout = setTimeout(() => socket.close(4001, 'Authentication timeout'), 10000)
@@ -1076,13 +1320,30 @@ webSocketServer.on('connection', (socket, request) => {
     clients.delete(socket)
     clientPresence.delete(socket)
     if (token && ![...clients.values()].includes(token)) {
-      const room = roomRow()
-      database.prepare(`
-        UPDATE sessions SET connected = 0, ready = CASE WHEN ? = 'lobby' THEN 0 ELSE ready END, last_seen = ?
-        WHERE token = ?
-      `).run(room.status, Date.now(), token)
-      if (room.status === 'lobby') reconcileCountdown()
-      broadcastLobby()
+      const membership = roomStore.getMembership(token)
+      if (membership) {
+        const multiplayerRoom = roomStore.getRoom(membership.room_id)
+        database.prepare('UPDATE sessions SET connected = 0, last_seen = ? WHERE token = ?')
+          .run(Date.now(), token)
+        if (multiplayerRoom?.status === 'lobby') {
+          database.prepare('UPDATE room_members SET ready = 0, last_active_at = ? WHERE session_token = ?')
+            .run(Date.now(), token)
+        }
+        broadcastMultiplayerLobby(membership.room_id)
+      } else {
+        if (legacySingleRoom) {
+          const room = roomRow()
+          database.prepare(`
+            UPDATE sessions SET connected = 0, ready = CASE WHEN ? = 'lobby' THEN 0 ELSE ready END, last_seen = ?
+            WHERE token = ?
+          `).run(room.status, Date.now(), token)
+          if (room.status === 'lobby') reconcileCountdown()
+          broadcastLobby()
+        } else {
+          database.prepare('UPDATE sessions SET connected = 0, last_seen = ? WHERE token = ?')
+            .run(Date.now(), token)
+        }
+      }
     }
   })
 })
@@ -1101,6 +1362,7 @@ heartbeatTimer.unref()
 webSocketServer.on('close', () => clearInterval(heartbeatTimer))
 
 setInterval(() => {
+  if (!legacySingleRoom) return
   if (roomRow().status !== 'lobby') return
   const now = Date.now()
   const disconnectedBefore = now - lobbyDisconnectDuration
@@ -1127,8 +1389,7 @@ setInterval(() => {
     .run(Date.now() - 24 * 60 * 60 * 1000)
 }, 60 * 60 * 1000).unref()
 
-setInterval(() => {
-  const room = roomRow()
+const processTurnTimeout = (room) => {
   if (room.status !== 'playing' || !room.game_id) return
   const game = database.prepare('SELECT state_json, turn_key, turn_deadline FROM games WHERE id = ?').get(room.game_id)
   if (!game?.state_json || !game.turn_deadline || game.turn_deadline > Date.now()) return
@@ -1191,6 +1452,14 @@ setInterval(() => {
     timeoutId: controller.timeoutId,
     actorId,
   })
+}
+
+setInterval(() => {
+  if (legacySingleRoom) processTurnTimeout(roomRow())
+  const multiplayerRooms = database.prepare(`
+    SELECT id, status, game_id FROM rooms WHERE status = 'playing' AND game_id IS NOT NULL
+  `).all()
+  for (const room of multiplayerRooms) processTurnTimeout(room)
 }, 500).unref()
 
 server.listen(port, host, () => {

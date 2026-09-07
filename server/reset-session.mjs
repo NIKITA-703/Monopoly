@@ -14,6 +14,10 @@ try {
   database.exec('BEGIN IMMEDIATE')
   database.prepare("UPDATE games SET status = 'finished' WHERE status = 'playing'").run()
   database.prepare("UPDATE room SET status = 'lobby', game_id = NULL, countdown_ends_at = NULL WHERE id = 1").run()
+  try {
+    database.prepare('DELETE FROM room_members').run()
+    database.prepare('DELETE FROM rooms').run()
+  } catch {}
   database.prepare('DELETE FROM sessions').run()
   database.exec('COMMIT')
   console.log(`Игровая сессия сброшена: ${databasePath}`)

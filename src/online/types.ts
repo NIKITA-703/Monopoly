@@ -9,6 +9,11 @@ export type LobbySeat = {
 }
 
 export type LobbyState = {
+  id?: string
+  code?: string
+  name?: string
+  visibility?: 'public' | 'private'
+  leaderPlayerId?: string
   status: 'lobby' | 'playing'
   gameId: string | null
   countdownEndsAt: number | null
@@ -20,6 +25,16 @@ export type OnlineSession = {
   nickname: string
   seat: number | null
   ready: number | boolean
+  isLeader?: boolean
+}
+
+export type RoomSummary = {
+  id: string
+  code: string
+  name: string
+  status: 'lobby' | 'playing'
+  playerCount: number
+  capacity: number
 }
 
 export type OnlineGameEvent =
@@ -30,7 +45,8 @@ export type OnlineGameEvent =
 export type ServerMessage =
   | { type: 'auth_ok'; token: string }
   | { type: 'auth_error'; message: string }
-  | { type: 'action_error'; message: string }
+  | { type: 'action_error'; message: string; code?: string }
+  | { type: 'room_home'; rooms: RoomSummary[] }
   | { type: 'lobby'; lobby: LobbyState; session: OnlineSession }
   | { type: 'game_state'; gameId: string; revision: number; turnDeadline: number | null; senderId?: string | null; state: unknown }
   | { type: 'turn_deadline'; gameId: string; turnDeadline: number | null }

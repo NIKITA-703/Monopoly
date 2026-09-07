@@ -47,7 +47,12 @@ function VersionStatus({ serverVersion }: { serverVersion: string | null }) {
 export default function OnlineGate() {
   const online = useOnlineLobby()
   const { reportLobbyActivity } = online
-  const [password, setPassword] = useState('')
+  const [roomMode, setRoomMode] = useState<'create' | 'join'>(() => online.inviteRoomCode ? 'join' : 'create')
+  const [roomName, setRoomName] = useState('Моя комната')
+  const [roomVisibility, setRoomVisibility] = useState<'public' | 'private'>('private')
+  const [roomPassword, setRoomPassword] = useState('')
+  const [roomCode, setRoomCode] = useState(online.inviteRoomCode)
+  const [copiedInvite, setCopiedInvite] = useState(false)
   const [nicknameError, setNicknameError] = useState('')
   const [now, setNow] = useState(() => Date.now())
   const [serverVersion, setServerVersion] = useState<string | null>(null)
@@ -113,9 +118,17 @@ export default function OnlineGate() {
     ? now === 0 ? 3 : Math.max(0, Math.ceil((online.lobby.countdownEndsAt - now) / 1000))
     : null
 
-  const submitPassword = (event: FormEvent) => {
+  const submitRoom = (event: FormEvent) => {
     event.preventDefault()
-    if (password.trim()) online.authenticate(password)
+    if (roomMode === 'create') {
+      online.createRoom({
+        name: roomName,
+        visibility: roomVisibility,
+        password: roomVisibility === 'private' ? roomPassword : '',
+      })
+      return
+    }
+    if (roomCode.trim()) online.joinRoom(roomCode, roomPassword)
   }
 
   if (online.status === 'replaced') {
@@ -134,24 +147,146 @@ export default function OnlineGate() {
     )
   }
 
-  if (online.status === 'password') {
+  if (online.roomHome) {
     return (
-      <main className="online-screen">
-        <form className="access-card" onSubmit={submitPassword}>
-          <span className="access-kicker">Monopoly Online</span>
-          <h1>Введите пароль</h1>
-          <p>Пароль защищает игровую комнату от случайных посетителей и ботов.</p>
-          <input
-            autoFocus
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            placeholder="Пароль комнаты"
-            autoComplete="current-password"
-          />
-          {online.error ? <span className="online-error">{online.error}</span> : null}
-          <button type="submit">Войти</button>
-        </form>
+      <main className="online-screen room-home-screen">
+        <section className="room-home-card room-browser">
+          <header className="room-home-header">
+            <span className="access-kicker">Monopoly Online</span>
+          </header>
+
+          <div className="room-browser-layout">
+            <aside className="room-create-panel">
+              <div className="room-mode-tabs" role="tablist" aria-label="Действие с комнатой">
+                <button
+                  type="button"
+                  className={roomMode === 'create' ? 'active' : ''}
+                  onClick={() => setRoomMode('create')}
+                >
+                  Создать
+                </button>
+                <button
+                  type="button"
+                  className={roomMode === 'join' ? 'active' : ''}
+                  onClick={() => setRoomMode('join')}
+                >
+                  По коду
+                </button>
+              </div>
+
+              <form className="room-form" onSubmit={submitRoom}>
+                {roomMode === 'create' ? (
+                  <>
+                    <label>
+                      Название комнаты
+                      <input
+                        autoFocus
+                        value={roomName}
+                        maxLength={40}
+                        onChange={(event) => setRoomName(event.target.value)}
+                        placeholder="Например, Вечерняя партия"
+                      />
+                    </label>
+                    <fieldset className="room-visibility">
+                      <legend>Доступ</legend>
+                      <label>
+                        <input
+                          type="radio"
+                          checked={roomVisibility === 'private'}
+                          onChange={() => setRoomVisibility('private')}
+                        />
+                        <span><strong>Закрытая</strong><small>Код и пароль</small></span>
+                      </label>
+                      <label>
+                        <input
+                          type="radio"
+                          checked={roomVisibility === 'public'}
+                          onChange={() => setRoomVisibility('public')}
+                        />
+                        <span><strong>Публичная</strong><small>Видна всем</small></span>
+                      </label>
+                    </fieldset>
+                  </>
+                ) : (
+                  <label>
+                    Код комнаты
+                    <input
+                      autoFocus
+                      className="room-code-input"
+                      value={roomCode}
+                      maxLength={6}
+                      onChange={(event) => setRoomCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+                      placeholder="ABC234"
+                      autoComplete="off"
+                    />
+                  </label>
+                )}
+
+                {(roomMode === 'join' || roomVisibility === 'private') ? (
+                  <label>
+                    Пароль {roomMode === 'join' ? <small>если установлен</small> : null}
+                    <input
+                      type="password"
+                      required={roomMode === 'create' && roomVisibility === 'private'}
+                      value={roomPassword}
+                      onChange={(event) => setRoomPassword(event.target.value)}
+                      placeholder={roomMode === 'join' ? 'Можно оставить пустым' : 'Придумайте пароль'}
+                      autoComplete="off"
+                    />
+                  </label>
+                ) : null}
+
+                {online.error ? <span className="online-error" role="alert">{online.error}</span> : null}
+                <button type="submit" disabled={roomMode === 'join' && roomCode.length !== 6}>
+                  {roomMode === 'create' ? 'Создать комнату' : 'Подключиться'}
+                </button>
+              </form>
+            </aside>
+
+            <section className="room-directory">
+              <header>
+                <div>
+                  <span className="access-kicker">Список серверов</span>
+                  <h2>Открытые комнаты</h2>
+                </div>
+                <span className="room-count">{online.rooms.length}</span>
+              </header>
+
+              {online.rooms.length > 0 ? (
+                <div className="room-list">
+                  {online.rooms.map((room) => {
+                    const unavailable = room.status === 'playing' || room.playerCount >= room.capacity
+                    return (
+                      <article className="room-list-item" key={room.id}>
+                        <div className="room-list-main">
+                          <span className={`room-status-dot ${room.status}`} aria-hidden="true" />
+                          <div>
+                            <strong>{room.name}</strong>
+                            <small>Код {room.code}</small>
+                          </div>
+                        </div>
+                        <span className="room-player-count">{room.playerCount}/{room.capacity}</span>
+                        <button
+                          type="button"
+                          disabled={unavailable}
+                          onClick={() => online.joinRoom(room.code, '')}
+                        >
+                          {room.status === 'playing' ? 'Игра идёт' : room.playerCount >= room.capacity ? 'Заполнена' : 'Войти'}
+                        </button>
+                      </article>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="room-list-empty">
+                  <span>🎲</span>
+                  <strong>Открытых комнат пока нет</strong>
+                  <p>Создайте публичную комнату — она сразу появится здесь у остальных игроков.</p>
+                </div>
+              )}
+            </section>
+          </div>
+        </section>
         <VersionStatus serverVersion={serverVersion} />
       </main>
     )
@@ -221,6 +356,12 @@ export default function OnlineGate() {
 
   const ownSeat = online.session.seat
   const isReady = Boolean(online.session.ready)
+  const occupiedLobbySeats = online.lobby.seats.filter((seat) => seat.playerId)
+  const canLeaderStart = Boolean(
+    online.session.isLeader &&
+    occupiedLobbySeats.length >= 2 &&
+    occupiedLobbySeats.every((seat) => seat.connected && seat.ready),
+  )
   const ownLobbySeat = ownSeat === null ? null : online.lobby.seats[ownSeat] ?? null
   const ownIdleSeconds = ownLobbySeat?.idleExpiresAt
     ? Math.max(0, Math.ceil((ownLobbySeat.idleExpiresAt - now) / 1000))
@@ -235,6 +376,20 @@ export default function OnlineGate() {
     if (nickname !== online.session?.nickname) online.setNickname(nickname)
     return true
   }
+  const inviteUrl = online.lobby.code
+    ? (() => {
+        const url = new URL(window.location.href)
+        url.searchParams.set('room', online.lobby?.code ?? '')
+        url.hash = ''
+        return url.toString()
+      })()
+    : ''
+  const copyInvite = async () => {
+    if (!inviteUrl) return
+    await navigator.clipboard.writeText(inviteUrl)
+    setCopiedInvite(true)
+    window.setTimeout(() => setCopiedInvite(false), 1600)
+  }
 
   return (
     <main className="online-screen lobby-screen">
@@ -242,17 +397,30 @@ export default function OnlineGate() {
         {online.status !== 'online' ? <span className="lobby-connection-warning">Переподключение…</span> : null}
         <header className="lobby-header">
           <div>
-            <span className="access-kicker">Общая комната</span>
-            <h1>Игровое лобби</h1>
+            <span className="access-kicker">{online.lobby.code ? `Комната ${online.lobby.code}` : 'Общая комната'}</span>
+            <h1>{online.lobby.name ?? 'Игровое лобби'}</h1>
           </div>
-          <span className="lobby-capacity">{players.length}/5 игроков</span>
+          <div className="lobby-header-actions">
+            {online.lobby.code ? (
+              <>
+                <button type="button" className="leave-room-button" onClick={online.leaveRoom}>
+                  Выйти
+                </button>
+                <button type="button" className="copy-invite-button" onClick={copyInvite}>
+                  {copiedInvite ? 'Ссылка скопирована' : 'Скопировать приглашение'}
+                </button>
+              </>
+            ) : null}
+            <span className="lobby-capacity">{players.length}/5 игроков</span>
+          </div>
         </header>
 
         <div className="lobby-seats">
           {online.lobby.seats.map((seat) => {
             const isOwn = seat.seat === ownSeat
+            const isLeader = Boolean(seat.playerId && seat.playerId === online.lobby?.leaderPlayerId)
             return (
-              <article className={`lobby-seat ${seat.nickname ? 'occupied' : ''} ${isOwn ? 'own' : ''}`} key={seat.seat}>
+              <article className={`lobby-seat ${seat.nickname ? 'occupied' : ''} ${isOwn ? 'own' : ''} ${isLeader ? 'leader' : ''}`} key={seat.seat}>
                 <span className="seat-number">{seat.seat + 1}</span>
                 {seat.nickname ? (
                   <>
@@ -271,7 +439,8 @@ export default function OnlineGate() {
                             : 'Переподключается'}
                       </span>
                     </div>
-                    {isOwn ? <span className="your-seat">Вы</span> : null}
+                    {isLeader ? <span className="leader-seat">Лидер</span> : null}
+                    {isOwn ? <span className={isLeader ? 'your-seat with-leader' : 'your-seat'}>Вы</span> : null}
                   </>
                 ) : (
                   <button type="button" onClick={() => online.claimSeat(seat.seat)}>Занять место</button>
@@ -316,10 +485,22 @@ export default function OnlineGate() {
               {nicknameError ? <span className="nickname-error">{nicknameError}</span> : null}
             </label>
             <div className="lobby-actions">
-              <button type="button" className="leave-seat-button" onClick={online.leaveSeat}>Освободить место</button>
+              {!online.lobby.code ? (
+                <button type="button" className="leave-seat-button" onClick={online.leaveSeat}>Освободить место</button>
+              ) : null}
               <button type="button" className={isReady ? 'ready-button active' : 'ready-button'} onClick={() => online.setReady(!isReady)}>
                 {isReady ? 'Готов ✓' : 'Я готов'}
               </button>
+              {online.session.isLeader ? (
+                <button
+                  type="button"
+                  className="start-game-button"
+                  disabled={!canLeaderStart}
+                  onClick={online.startGame}
+                >
+                  Начать игру
+                </button>
+              ) : null}
             </div>
           </section>
         ) : (
@@ -333,7 +514,13 @@ export default function OnlineGate() {
             <small>Игра запускается…</small>
           </div>
         ) : (
-          <footer className="lobby-footer">Игра начнётся, когда все занявшие место игроки нажмут «Я готов».</footer>
+          <footer className="lobby-footer">
+            {online.lobby.code
+              ? online.session.isLeader
+                ? 'Вы лидер комнаты. После готовности всех игроков вы сможете начать игру.'
+                : 'После готовности всех игроков лидер комнаты сможет начать игру.'
+              : 'Игра начнётся, когда все занявшие место игроки нажмут «Я готов».'}
+          </footer>
         )}
       </section>
       <VersionStatus serverVersion={serverVersion} />

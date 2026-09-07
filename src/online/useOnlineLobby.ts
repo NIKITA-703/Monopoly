@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { LobbyState, OnlineGameEvent, OnlineSession, ServerMessage } from './types'
+import type { LobbyState, OnlineGameEvent, OnlineSession, RoomSummary, ServerMessage } from './types'
 import { playGameSound } from '../audio/gameAudio'
 
 const sessionStorageKey = 'monopoly.online.session'
 const persistentSessionStorageKey = 'monopoly.online.player-session'
 const repeatProtectedMessageTypes = new Set([
   'claim_seat', 'leave_seat', 'set_nickname', 'set_ready', 'turn_action_started',
-  'game_event', 'chat_message', 'game_snapshot', 'return_to_lobby',
+  'create_room', 'join_room', 'leave_room', 'start_game', 'game_event', 'chat_message', 'game_snapshot', 'return_to_lobby',
 ])
 type GameStateMessage = Extract<ServerMessage, { type: 'game_state' }>
 const webSocketUrl = () => {
@@ -16,14 +16,15 @@ const webSocketUrl = () => {
   return `${protocol}//${window.location.host}/ws`
 }
 
-type ConnectionStatus = 'connecting' | 'password' | 'online' | 'offline' | 'replaced'
+type ConnectionStatus = 'connecting' | 'online' | 'offline' | 'replaced'
+
+const inviteRoomCode = new URLSearchParams(window.location.search)
+  .get('room')?.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) ?? ''
 
 export function useOnlineLobby() {
   const socketRef = useRef<WebSocket | null>(null)
   const reconnectTimerRef = useRef<number | null>(null)
-  const passwordRef = useRef('')
   const playerIdRef = useRef<string | null>(null)
-  const passwordScreenRef = useRef(false)
   const sessionEstablishedRef = useRef(false)
   const receivedGameEventIdsRef = useRef(new Set<string>())
   const pendingGameEventIdsRef = useRef(new Set<string>())
@@ -34,9 +35,12 @@ export function useOnlineLobby() {
   const lastImmediateTradeSoundRef = useRef<string | null>(null)
   const lastImmediateAuctionSoundRef = useRef<string | null>(null)
   const recentRequestsRef = useRef(new Map<string, { requestId: string; sentAt: number }>())
+  const inviteAttemptedRef = useRef(false)
   const [status, setStatus] = useState<ConnectionStatus>('connecting')
   const [lobby, setLobby] = useState<LobbyState | null>(null)
   const [session, setSession] = useState<OnlineSession | null>(null)
+  const [roomHome, setRoomHome] = useState(false)
+  const [rooms, setRooms] = useState<RoomSummary[]>([])
   const [error, setError] = useState('')
   const [gameState, setGameState] = useState<{ gameId: string; revision: number; state: unknown } | null>(null)
   const [turnDeadline, setTurnDeadline] = useState<number | null>(null)
@@ -106,7 +110,7 @@ export function useOnlineLobby() {
 
     const connect = () => {
       if (disposed || replacedByAnotherTab) return
-      setStatus((current) => current === 'password' ? current : 'connecting')
+      setStatus('connecting')
       const socket = new WebSocket(webSocketUrl())
       socketRef.current = socket
 
@@ -115,14 +119,8 @@ export function useOnlineLobby() {
         const token = window.sessionStorage.getItem(sessionStorageKey)
           ?? window.localStorage.getItem(persistentSessionStorageKey)
         if (token) {
-          passwordScreenRef.current = false
           socket.send(JSON.stringify({ type: 'auth', token }))
-        } else if (passwordRef.current) {
-          passwordScreenRef.current = false
-          socket.send(JSON.stringify({ type: 'auth', password: passwordRef.current }))
         } else {
-          // Общая HttpOnly-cookie подтверждает доступ к комнате, а сервер
-          // выдаёт этой вкладке отдельную игровую сессию.
           socket.send(JSON.stringify({ type: 'auth' }))
         }
       })
@@ -130,10 +128,8 @@ export function useOnlineLobby() {
       socket.addEventListener('message', (event) => {
         const message = JSON.parse(String(event.data)) as ServerMessage
         if (message.type === 'auth_ok') {
-          passwordScreenRef.current = false
           window.sessionStorage.setItem(sessionStorageKey, message.token)
           window.localStorage.setItem(persistentSessionStorageKey, message.token)
-          passwordRef.current = ''
           setError('')
           setStatus('online')
           socket.send(JSON.stringify({
@@ -143,15 +139,27 @@ export function useOnlineLobby() {
           return
         }
         if (message.type === 'auth_error') {
-          passwordScreenRef.current = true
           window.sessionStorage.removeItem(sessionStorageKey)
           window.localStorage.removeItem(persistentSessionStorageKey)
           setError(message.message)
-          setStatus('password')
+          setStatus('offline')
           return
         }
         if (message.type === 'action_error') {
           setError(message.message)
+          return
+        }
+        if (message.type === 'room_home') {
+          sessionEstablishedRef.current = true
+          setLobby(null)
+          setSession(null)
+          setRoomHome(true)
+          setRooms(message.rooms)
+          setStatus('online')
+          if (inviteRoomCode && !inviteAttemptedRef.current) {
+            inviteAttemptedRef.current = true
+            send({ type: 'join_room', code: inviteRoomCode, password: '' })
+          }
           return
         }
         if (message.type === 'lobby') {
@@ -159,6 +167,7 @@ export function useOnlineLobby() {
           playerIdRef.current = message.session?.playerId ?? null
           setLobby(message.lobby)
           setSession(message.session)
+          setRoomHome(false)
           setStatus('online')
           setError('')
           if (message.lobby.status !== 'playing') {
@@ -303,7 +312,7 @@ export function useOnlineLobby() {
           setStatus('replaced')
           return
         }
-        setStatus(passwordScreenRef.current ? 'password' : sessionEstablishedRef.current ? 'offline' : 'connecting')
+        setStatus(sessionEstablishedRef.current ? 'offline' : 'connecting')
         reconnectTimerRef.current = window.setTimeout(connect, reconnectDelay)
         reconnectDelay = Math.min(reconnectDelay * 2, 5000)
       })
@@ -316,34 +325,8 @@ export function useOnlineLobby() {
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
       socketRef.current?.close()
     }
-  }, [])
+  }, [send])
 
-  const authenticate = async (password: string) => {
-    passwordScreenRef.current = false
-    passwordRef.current = password
-    setError('')
-    try {
-      const response = await fetch('/api/access', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password }),
-      })
-      const result = await response.json() as { ok?: boolean; message?: string }
-      if (!response.ok || !result.ok) {
-        passwordScreenRef.current = true
-        passwordRef.current = ''
-        setError(result.message ?? 'Неверный пароль')
-        setStatus('password')
-        return
-      }
-      send({ type: 'auth', password })
-    } catch {
-      passwordScreenRef.current = true
-      setError('Не удалось связаться с сервером')
-      setStatus('password')
-    }
-  }
   const publishGameState = useCallback((state: unknown) => {
     const timeoutId = pendingTimeoutIdRef.current
     send({ type: 'game_snapshot', state, ...(timeoutId ? { timeoutId } : {}) })
@@ -372,17 +355,32 @@ export function useOnlineLobby() {
     status,
     lobby,
     session,
+    roomHome,
+    rooms,
+    inviteRoomCode,
     error,
     gameState,
     turnDeadline,
     turnTimeout,
     gameEvent: gameEvents[0] ?? null,
     acknowledgeGameEvent,
-    authenticate,
+    createRoom: (details: { name: string; visibility: 'public' | 'private'; password: string }) => {
+      setError('')
+      send({ type: 'create_room', ...details })
+    },
+    joinRoom: (code: string, password: string) => {
+      setError('')
+      send({ type: 'join_room', code, password })
+    },
+    leaveRoom: () => {
+      setError('')
+      send({ type: 'leave_room' })
+    },
     claimSeat: (seat: number) => send({ type: 'claim_seat', seat }),
     leaveSeat: () => send({ type: 'leave_seat' }),
     setNickname: (nickname: string) => send({ type: 'set_nickname', nickname }),
     setReady: (ready: boolean) => send({ type: 'set_ready', ready }),
+    startGame: () => send({ type: 'start_game' }),
     reportLobbyActivity,
     publishGameState,
     beginTurnAction: () => send({ type: 'turn_action_started' }),
