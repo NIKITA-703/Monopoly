@@ -6,7 +6,7 @@ const sessionStorageKey = 'monopoly.online.session'
 const persistentSessionStorageKey = 'monopoly.online.player-session'
 const repeatProtectedMessageTypes = new Set([
   'claim_seat', 'leave_seat', 'set_nickname', 'set_ready', 'turn_action_started',
-  'create_room', 'join_room', 'leave_room', 'game_event', 'chat_message', 'game_snapshot', 'return_to_lobby',
+  'create_room', 'join_room', 'leave_room', 'start_game', 'game_event', 'chat_message', 'game_snapshot', 'return_to_lobby',
 ])
 type GameStateMessage = Extract<ServerMessage, { type: 'game_state' }>
 const webSocketUrl = () => {
@@ -380,6 +380,7 @@ export function useOnlineLobby() {
     leaveSeat: () => send({ type: 'leave_seat' }),
     setNickname: (nickname: string) => send({ type: 'set_nickname', nickname }),
     setReady: (ready: boolean) => send({ type: 'set_ready', ready }),
+    startGame: () => send({ type: 'start_game' }),
     reportLobbyActivity,
     publishGameState,
     beginTurnAction: () => send({ type: 'turn_action_started' }),

@@ -87,6 +87,12 @@ export const createRoomStore = (database, options = {}) => {
     WHERE id = ?
   `).get(roomId)
 
+  const findRoomByGameId = (gameId) => database.prepare(`
+    SELECT id, code, name, visibility, password_hash, status, leader_token, game_id, created_at, updated_at
+    FROM rooms
+    WHERE game_id = ?
+  `).get(gameId)
+
   const getMembership = (sessionToken) => database.prepare(`
     SELECT room_id, session_token, seat, ready, joined_at, last_active_at
     FROM room_members
@@ -234,6 +240,7 @@ export const createRoomStore = (database, options = {}) => {
   return {
     createRoom,
     findRoomByCode,
+    findRoomByGameId,
     getMembership,
     getRoom,
     joinRoom,

@@ -104,6 +104,7 @@ const idempotentMessageTypes = new Set([
   'leave_seat',
   'set_nickname',
   'set_ready',
+  'start_game',
   'create_room',
   'join_room',
   'leave_room',
@@ -295,10 +296,20 @@ const sendStoredGameState = (socket, gameId) => {
   })
 }
 
-const broadcastGameState = (gameId, state, revision, turnDeadline, senderId = null) => {
-  for (const socket of clients.keys()) {
-    send(socket, { type: 'game_state', gameId, revision, turnDeadline, senderId, state })
+const tokenBelongsToGame = (token, gameId) => {
+  const membership = roomStore.getMembership(token)
+  if (membership) return roomStore.getRoom(membership.room_id)?.game_id === gameId
+  return legacySingleRoom && roomRow().game_id === gameId
+}
+
+const broadcastToGame = (gameId, message) => {
+  for (const [socket, token] of clients) {
+    if (tokenBelongsToGame(token, gameId)) send(socket, message)
   }
+}
+
+const broadcastGameState = (gameId, state, revision, turnDeadline, senderId = null) => {
+  broadcastToGame(gameId, { type: 'game_state', gameId, revision, turnDeadline, senderId, state })
 }
 
 const getTurnActorId = (state) => {
@@ -485,20 +496,33 @@ const returnGameToLobby = (gameId, reason) => {
   if (returnTimer) clearTimeout(returnTimer)
   gameReturnTimers.delete(gameId)
   database.prepare('UPDATE games SET status = ? WHERE id = ?').run('finished', gameId)
-  database.prepare("UPDATE room SET status = 'lobby', game_id = NULL, countdown_ends_at = NULL WHERE id = 1").run()
-  database.prepare('UPDATE sessions SET ready = 0, last_seen = ? WHERE seat IS NOT NULL').run(Date.now())
+  const multiplayerRoom = roomStore.findRoomByGameId(gameId)
+  if (multiplayerRoom) {
+    database.prepare("UPDATE rooms SET status = 'lobby', game_id = NULL, updated_at = ? WHERE id = ?")
+      .run(Date.now(), multiplayerRoom.id)
+    database.prepare('UPDATE room_members SET ready = 0, last_active_at = ? WHERE room_id = ?')
+      .run(Date.now(), multiplayerRoom.id)
+  } else {
+    database.prepare("UPDATE room SET status = 'lobby', game_id = NULL, countdown_ends_at = NULL WHERE id = 1").run()
+    database.prepare('UPDATE sessions SET ready = 0, last_seen = ? WHERE seat IS NOT NULL').run(Date.now())
+  }
   timeoutControllers.delete(gameId)
   turnActionControllers.delete(gameId)
   movementAuthorizations.delete(gameId)
   rollAuthorizations.delete(gameId)
   trace('game_returned_to_lobby', { gameId, reason })
-  broadcastLobby()
+  if (multiplayerRoom) {
+    broadcastMultiplayerLobby(multiplayerRoom.id)
+    broadcastRoomHome()
+  } else {
+    broadcastLobby()
+  }
 }
 
 const scheduleGameReturnToLobby = (gameId) => {
   if (gameReturnTimers.has(gameId)) return
   const returnTimer = setTimeout(() => {
-    const currentRoom = roomRow()
+    const currentRoom = roomStore.findRoomByGameId(gameId) ?? roomRow()
     if (currentRoom.status === 'playing' && currentRoom.game_id === gameId) {
       returnGameToLobby(gameId, 'winner_detected')
     }
@@ -529,6 +553,48 @@ const beginGame = () => {
     playerIds: participants.map((participant) => publicPlayerId(participant.token)),
   })
   broadcastLobby()
+}
+
+const beginMultiplayerGame = (roomId, leaderToken) => {
+  const room = roomStore.getRoom(roomId)
+  if (!room || room.status !== 'lobby') throw new Error('room_not_ready')
+  if (room.leader_token !== leaderToken) throw new Error('leader_only')
+
+  const participants = roomStore.listMembers(roomId).map((member) => ({
+    ...member,
+    session: database.prepare('SELECT nickname, connected FROM sessions WHERE token = ?').get(member.session_token),
+  }))
+  if (
+    participants.length < 2 ||
+    participants.some((participant) => !participant.ready || !participant.session?.connected)
+  ) throw new Error('room_not_ready')
+
+  const now = Date.now()
+  const gameId = randomUUID()
+  database.exec('BEGIN IMMEDIATE')
+  try {
+    database.prepare('INSERT INTO games (id, status, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run(gameId, 'playing', now, now)
+    const update = database.prepare(`
+      UPDATE rooms SET status = 'playing', game_id = ?, updated_at = ?
+      WHERE id = ? AND status = 'lobby' AND leader_token = ?
+    `).run(gameId, now, roomId, leaderToken)
+    if (update.changes !== 1) throw new Error('room_not_ready')
+    database.prepare('UPDATE room_members SET ready = 0, last_active_at = ? WHERE room_id = ?')
+      .run(now, roomId)
+    database.exec('COMMIT')
+  } catch (error) {
+    database.exec('ROLLBACK')
+    throw error
+  }
+
+  trace('game_started', {
+    roomId,
+    gameId,
+    playerIds: participants.map((participant) => publicPlayerId(participant.session_token)),
+  })
+  broadcastMultiplayerLobby(roomId)
+  broadcastRoomHome()
 }
 
 const reconcileCountdown = () => {
@@ -601,6 +667,8 @@ const roomActionMessages = {
   room_full: 'В комнате уже пять игроков',
   room_not_found: 'Комната с таким кодом не найдена',
   room_password_required: 'Для закрытой комнаты задайте пароль',
+  leader_only: 'Только лидер комнаты может начать игру',
+  room_not_ready: 'Для запуска нужны минимум два подключённых и готовых игрока',
 }
 
 const handleRoomDirectoryMessage = (socket, token, message) => {
@@ -665,6 +733,19 @@ const handleMultiplayerLobbyMessage = (socket, token, message, membership) => {
   const now = Date.now()
   let lobbyChanged = false
 
+  if (message.type === 'start_game') {
+    try {
+      beginMultiplayerGame(room.id, token)
+    } catch (error) {
+      send(socket, {
+        type: 'action_error',
+        message: roomActionMessages[error?.message] ?? 'Не удалось начать игру',
+        code: error?.message ?? 'start_game_failed',
+      })
+    }
+    return
+  }
+
   if (message.type === 'claim_seat') {
     const seat = Number(message.seat)
     if (!Number.isInteger(seat) || seat < 0 || seat > 4) return
@@ -723,13 +804,17 @@ const handleMultiplayerLobbyMessage = (socket, token, message, membership) => {
 const handleLobbyMessage = (socket, token, message) => {
   if (handleRoomDirectoryMessage(socket, token, message)) return
   const membership = roomStore.getMembership(token)
+  const membershipRoom = membership ? roomStore.getRoom(membership.room_id) : null
   if (membership) {
     handleMultiplayerLobbyMessage(socket, token, message, membership)
-    return
+    if (membershipRoom?.status === 'lobby' || message.type === 'client_presence') return
   }
-  if (!legacySingleRoom) return
-  const room = roomRow()
-  const session = database.prepare('SELECT * FROM sessions WHERE token = ?').get(token)
+  if (!membership && !legacySingleRoom) return
+  const room = membershipRoom ?? roomRow()
+  const storedSession = database.prepare('SELECT * FROM sessions WHERE token = ?').get(token)
+  const session = membership && storedSession
+    ? { ...storedSession, seat: membership.seat, ready: membership.ready }
+    : storedSession
   if (!session) return
 
   if (message.type === 'client_presence') {
@@ -757,9 +842,7 @@ const handleLobbyMessage = (socket, token, message) => {
     turnActionControllers.set(room.game_id, { turnKey: game.turn_key, playerId: senderId })
     timeoutControllers.delete(room.game_id)
     database.prepare('UPDATE games SET turn_deadline = ? WHERE id = ?').run(actionDeadline, room.game_id)
-    for (const client of clients.keys()) {
-      send(client, { type: 'turn_deadline', gameId: room.game_id, turnDeadline: actionDeadline })
-    }
+    broadcastToGame(room.game_id, { type: 'turn_deadline', gameId: room.game_id, turnDeadline: actionDeadline })
     trace('turn_action_started', { gameId: room.game_id, senderId, turnKey: game.turn_key })
     return
   }
@@ -837,7 +920,7 @@ const handleLobbyMessage = (socket, token, message) => {
     }
     const payload = { type: 'game_event', gameId: room.game_id, eventId: randomUUID(), senderId, event }
     if (validMovement || validDirectMovement) recordLanding(room.game_id, state, event)
-    for (const client of clients.keys()) send(client, payload)
+    broadcastToGame(room.game_id, payload)
     trace('game_event', { gameId: room.game_id, eventId: payload.eventId, senderId, kind: event.kind })
     return
   }
@@ -887,7 +970,9 @@ const handleLobbyMessage = (socket, token, message) => {
     state.serverEconomy = storedState?.serverEconomy ?? { rewardKeys: [] }
     preservePendingServerRewards(storedState, state)
     const expectedPlayerIds = storedState?.players?.map((player) => player.id)
-      ?? sessionRows().filter((item) => item.seat !== null).map((item) => publicPlayerId(item.token))
+      ?? (membership
+        ? roomStore.listMembers(room.id).map((item) => publicPlayerId(item.session_token))
+        : sessionRows().filter((item) => item.seat !== null).map((item) => publicPlayerId(item.token)))
     const validationError = validateGameState(state, expectedPlayerIds) ??
       (!storedState ? validateInitialGameState(state) : null)
     if (validationError) {
@@ -1304,9 +1389,7 @@ setInterval(() => {
     .run(Date.now() - 24 * 60 * 60 * 1000)
 }, 60 * 60 * 1000).unref()
 
-setInterval(() => {
-  if (!legacySingleRoom) return
-  const room = roomRow()
+const processTurnTimeout = (room) => {
   if (room.status !== 'playing' || !room.game_id) return
   const game = database.prepare('SELECT state_json, turn_key, turn_deadline FROM games WHERE id = ?').get(room.game_id)
   if (!game?.state_json || !game.turn_deadline || game.turn_deadline > Date.now()) return
@@ -1369,6 +1452,14 @@ setInterval(() => {
     timeoutId: controller.timeoutId,
     actorId,
   })
+}
+
+setInterval(() => {
+  if (legacySingleRoom) processTurnTimeout(roomRow())
+  const multiplayerRooms = database.prepare(`
+    SELECT id, status, game_id FROM rooms WHERE status = 'playing' AND game_id IS NOT NULL
+  `).all()
+  for (const room of multiplayerRooms) processTurnTimeout(room)
 }, 500).unref()
 
 server.listen(port, host, () => {

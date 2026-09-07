@@ -155,6 +155,51 @@ try {
     message.type === 'lobby' && message.lobby.id === firstLobby.lobby.id && message.session.isLeader)
   assert.equal(transferredLeadership.lobby.leaderPlayerId, transferredLeadership.session.playerId)
 
+  send(spectator, {
+    type: 'join_room', code: otherLobby.lobby.code, password: '', requestId: 'join-public-for-start',
+  })
+  await waitFor(third.socket, (message) =>
+    message.type === 'lobby' && message.lobby.id === otherLobby.lobby.id &&
+    message.lobby.seats.filter((seat) => seat.playerId).length === 2)
+  send(third, { type: 'set_ready', ready: true, requestId: 'public-leader-ready' })
+  send(spectator, { type: 'set_ready', ready: true, requestId: 'public-member-ready' })
+  await waitFor(third.socket, (message) =>
+    message.type === 'lobby' && message.lobby.id === otherLobby.lobby.id &&
+    message.lobby.seats.filter((seat) => seat.playerId).every((seat) => seat.ready))
+
+  send(spectator, { type: 'start_game', requestId: 'non-leader-start' })
+  const leaderOnly = await waitFor(spectator.socket, (message) =>
+    message.type === 'action_error' && message.code === 'leader_only')
+  assert.equal(leaderOnly.code, 'leader_only')
+
+  send(third, { type: 'start_game', requestId: 'leader-starts-game' })
+  const startedLobby = await waitFor(third.socket, (message) =>
+    message.type === 'lobby' && message.lobby.id === otherLobby.lobby.id && message.lobby.status === 'playing')
+  assert.ok(startedLobby.lobby.gameId, 'Лидер должен запустить отдельную игру комнаты')
+  assert.equal(transferredLeadership.lobby.status, 'lobby', 'Другая комната должна остаться в лобби')
+
+  const startedPlayerIds = startedLobby.lobby.seats.filter((seat) => seat.playerId).map((seat) => seat.playerId)
+  const initialGameState = {
+    players: startedPlayerIds.map((id, index) => ({
+      id, name: `Room player ${index + 1}`, money: 15000, position: 0, color: '#fff', avatar: 'P',
+    })),
+    activePlayerIndex: 0, turnSequence: 0, pendingTileId: null, pendingPayment: null,
+    auction: null, casino: null, tradeDraft: null, owners: {}, propertyLevels: {},
+    mortgagedPropertyIds: [], mortgageExpiryTurns: {}, logs: [], lastRoll: null,
+    eventPaymentQueue: [], hasExtraRoll: false, jailedPlayerIds: [], jailFailedAttempts: {},
+    casinoJackpot: 2000, upgradedGroupsThisTurn: [], playerEffects: {}, lapCounts: {},
+    tradeRequestsThisTurn: 0, missedTurnCounts: {}, eliminatedPlayerIds: [], winnerId: null,
+  }
+  queues.set(reconnected.socket, queues.get(reconnected.socket).filter((message) => message.type !== 'game_state'))
+  send(third, { type: 'game_snapshot', state: initialGameState, requestId: 'initial-public-game-state' })
+  const publicGameState = await waitFor(spectator.socket, (message) =>
+    message.type === 'game_state' && message.gameId === startedLobby.lobby.gameId)
+  assert.deepEqual(publicGameState.state.players.map((player) => player.id), startedPlayerIds)
+  assert.ok(
+    !queues.get(reconnected.socket).some((message) => message.type === 'game_state' && message.gameId === startedLobby.lobby.gameId),
+    'Состояние игры не должно отправляться участникам другой комнаты',
+  )
+
   first.socket.close()
   reconnected.socket.close()
   third.socket.close()

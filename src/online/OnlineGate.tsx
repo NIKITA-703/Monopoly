@@ -356,6 +356,12 @@ export default function OnlineGate() {
 
   const ownSeat = online.session.seat
   const isReady = Boolean(online.session.ready)
+  const occupiedLobbySeats = online.lobby.seats.filter((seat) => seat.playerId)
+  const canLeaderStart = Boolean(
+    online.session.isLeader &&
+    occupiedLobbySeats.length >= 2 &&
+    occupiedLobbySeats.every((seat) => seat.connected && seat.ready),
+  )
   const ownLobbySeat = ownSeat === null ? null : online.lobby.seats[ownSeat] ?? null
   const ownIdleSeconds = ownLobbySeat?.idleExpiresAt
     ? Math.max(0, Math.ceil((ownLobbySeat.idleExpiresAt - now) / 1000))
@@ -485,6 +491,16 @@ export default function OnlineGate() {
               <button type="button" className={isReady ? 'ready-button active' : 'ready-button'} onClick={() => online.setReady(!isReady)}>
                 {isReady ? 'Готов ✓' : 'Я готов'}
               </button>
+              {online.session.isLeader ? (
+                <button
+                  type="button"
+                  className="start-game-button"
+                  disabled={!canLeaderStart}
+                  onClick={online.startGame}
+                >
+                  Начать игру
+                </button>
+              ) : null}
             </div>
           </section>
         ) : (

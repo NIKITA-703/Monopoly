@@ -508,6 +508,12 @@
 .lobby-actions button { min-width: 160px; padding: 0 18px; }
 .lobby-actions .leave-seat-button { color: #c1cedc; background: rgba(255, 255, 255, 0.08); }
 .lobby-actions .ready-button.active { background: #267e6c; box-shadow: inset 0 0 0 2px #59e0c4; }
+.lobby-actions .start-game-button { color: #07110f; background: #ffd166; }
+.lobby-actions .start-game-button:disabled {
+  color: #718196;
+  background: rgba(255, 255, 255, 0.07);
+  cursor: not-allowed;
+}
 
 .lobby-idle-warning {
   display: flex;
