@@ -28,8 +28,17 @@
 }
 
 .room-home-card {
-  width: min(1180px, 100%);
+  width: min(1380px, calc(100vw - 64px));
   padding: 34px;
+}
+
+.room-home-screen { padding: 32px; }
+
+.room-browser {
+  height: min(980px, calc(100vh - 64px));
+  min-height: 620px;
+  display: flex;
+  flex-direction: column;
 }
 
 .room-home-header {
@@ -42,8 +51,10 @@
 .room-home-header p { margin: 0; color: #9fb0c4; line-height: 1.5; }
 
 .room-browser-layout {
+  min-height: 0;
+  flex: 1;
   display: grid;
-  grid-template-columns: minmax(290px, 0.72fr) minmax(480px, 1.45fr);
+  grid-template-columns: minmax(330px, 0.72fr) minmax(560px, 1.65fr);
   gap: 22px;
   align-items: stretch;
 }
@@ -57,7 +68,7 @@
 
 .room-create-panel { padding: 18px; }
 .room-directory {
-  min-height: 480px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   padding: 22px;
@@ -85,7 +96,11 @@
 }
 
 .room-list {
+  min-height: 0;
+  flex: 1;
   display: grid;
+  grid-auto-rows: max-content;
+  align-content: start;
   gap: 10px;
   margin-top: 16px;
   overflow: auto;
@@ -565,6 +580,12 @@
 .game-reconnect-notice small { color: #91a1b3; font-size: 11px; }
 
 @media (max-width: 900px) {
+  .room-home-screen { padding: 18px; }
+  .room-browser {
+    width: calc(100vw - 36px);
+    height: auto;
+    min-height: calc(100vh - 36px);
+  }
   .room-browser-layout { grid-template-columns: 1fr; }
   .room-directory { min-height: 360px; }
   .lobby-seats { grid-template-columns: repeat(2, 1fr); }
