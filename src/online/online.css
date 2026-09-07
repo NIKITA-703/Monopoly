@@ -448,7 +448,8 @@
 }
 
 .seat-number,
-.your-seat {
+.your-seat,
+.leader-seat {
   position: absolute;
   top: 10px;
   color: #718196;
@@ -459,6 +460,17 @@
 
 .seat-number { left: 12px; }
 .your-seat { right: 12px; color: #42d1b5; }
+.your-seat.with-leader { top: 30px; }
+.leader-seat {
+  right: 12px;
+  color: #ffd166;
+  text-shadow: 0 0 12px rgba(255, 209, 102, 0.35);
+}
+.lobby-seat.leader { border-color: rgba(255, 209, 102, 0.52); }
+.lobby-seat.leader.own {
+  border-color: #42d1b5;
+  box-shadow: 0 0 24px rgba(66, 209, 181, 0.14), inset 0 0 0 1px rgba(255, 209, 102, 0.2);
+}
 
 .seat-avatar {
   --seat-color: #42d1b5;

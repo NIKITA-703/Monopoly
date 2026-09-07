@@ -412,8 +412,9 @@ export default function OnlineGate() {
         <div className="lobby-seats">
           {online.lobby.seats.map((seat) => {
             const isOwn = seat.seat === ownSeat
+            const isLeader = Boolean(seat.playerId && seat.playerId === online.lobby?.leaderPlayerId)
             return (
-              <article className={`lobby-seat ${seat.nickname ? 'occupied' : ''} ${isOwn ? 'own' : ''}`} key={seat.seat}>
+              <article className={`lobby-seat ${seat.nickname ? 'occupied' : ''} ${isOwn ? 'own' : ''} ${isLeader ? 'leader' : ''}`} key={seat.seat}>
                 <span className="seat-number">{seat.seat + 1}</span>
                 {seat.nickname ? (
                   <>
@@ -432,7 +433,8 @@ export default function OnlineGate() {
                             : 'Переподключается'}
                       </span>
                     </div>
-                    {isOwn ? <span className="your-seat">Вы</span> : null}
+                    {isLeader ? <span className="leader-seat">Лидер</span> : null}
+                    {isOwn ? <span className={isLeader ? 'your-seat with-leader' : 'your-seat'}>Вы</span> : null}
                   </>
                 ) : (
                   <button type="button" onClick={() => online.claimSeat(seat.seat)}>Занять место</button>
@@ -477,7 +479,9 @@ export default function OnlineGate() {
               {nicknameError ? <span className="nickname-error">{nicknameError}</span> : null}
             </label>
             <div className="lobby-actions">
-              <button type="button" className="leave-seat-button" onClick={online.leaveSeat}>Освободить место</button>
+              {!online.lobby.code ? (
+                <button type="button" className="leave-seat-button" onClick={online.leaveSeat}>Освободить место</button>
+              ) : null}
               <button type="button" className={isReady ? 'ready-button active' : 'ready-button'} onClick={() => online.setReady(!isReady)}>
                 {isReady ? 'Готов ✓' : 'Я готов'}
               </button>
@@ -494,7 +498,13 @@ export default function OnlineGate() {
             <small>Игра запускается…</small>
           </div>
         ) : (
-          <footer className="lobby-footer">Игра начнётся, когда все занявшие место игроки нажмут «Я готов».</footer>
+          <footer className="lobby-footer">
+            {online.lobby.code
+              ? online.session.isLeader
+                ? 'Вы лидер комнаты. После готовности всех игроков вы сможете начать игру.'
+                : 'После готовности всех игроков лидер комнаты сможет начать игру.'
+              : 'Игра начнётся, когда все занявшие место игроки нажмут «Я готов».'}
+          </footer>
         )}
       </section>
       <VersionStatus serverVersion={serverVersion} />

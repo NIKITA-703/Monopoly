@@ -253,7 +253,7 @@ const sendMultiplayerLobby = (socket, token, roomId) => {
     session: {
       nickname: session.nickname,
       seat: member.seat,
-      ready: member.ready,
+      ready: Boolean(member.ready),
       playerId: publicPlayerId(token),
       isLeader: lobby.leaderPlayerId === publicPlayerId(token),
     },
@@ -648,9 +648,85 @@ const handleRoomDirectoryMessage = (socket, token, message) => {
   return true
 }
 
+const handleMultiplayerLobbyMessage = (socket, token, message, membership) => {
+  const room = roomStore.getRoom(membership.room_id)
+  const session = database.prepare('SELECT * FROM sessions WHERE token = ?').get(token)
+  if (!room || !session) return
+
+  if (message.type === 'client_presence') {
+    clientPresence.set(socket, {
+      visible: message.visible === true,
+      updatedAt: Date.now(),
+    })
+    return
+  }
+
+  if (room.status !== 'lobby') return
+  const now = Date.now()
+  let lobbyChanged = false
+
+  if (message.type === 'claim_seat') {
+    const seat = Number(message.seat)
+    if (!Number.isInteger(seat) || seat < 0 || seat > 4) return
+    const occupant = database.prepare(`
+      SELECT session_token FROM room_members WHERE room_id = ? AND seat = ?
+    `).get(room.id, seat)
+    if (occupant && occupant.session_token !== token) {
+      send(socket, { type: 'action_error', message: 'Это место уже занято' })
+      return
+    }
+    database.prepare(`
+      UPDATE room_members SET seat = ?, ready = 0, last_active_at = ?
+      WHERE room_id = ? AND session_token = ?
+    `).run(seat, now, room.id, token)
+    lobbyChanged = true
+  }
+
+  if (message.type === 'set_nickname') {
+    const nickname = String(message.nickname ?? '').trim().replace(/\s+/g, ' ').slice(0, 20)
+    if (nickname.length < 1) {
+      send(socket, { type: 'action_error', message: 'Ник не может быть пустым' })
+      return
+    }
+    database.prepare('UPDATE sessions SET nickname = ?, last_seen = ? WHERE token = ?')
+      .run(nickname, now, token)
+    database.prepare(`
+      UPDATE room_members SET ready = 0, last_active_at = ?
+      WHERE room_id = ? AND session_token = ?
+    `).run(now, room.id, token)
+    lobbyChanged = true
+  }
+
+  if (message.type === 'set_ready') {
+    database.prepare(`
+      UPDATE room_members SET ready = ?, last_active_at = ?
+      WHERE room_id = ? AND session_token = ?
+    `).run(message.ready ? 1 : 0, now, room.id, token)
+    trace('room_lobby_ready_changed', {
+      roomId: room.id,
+      playerId: publicPlayerId(token),
+      ready: Boolean(message.ready),
+    })
+    lobbyChanged = true
+  }
+
+  if (message.type === 'lobby_activity') {
+    database.prepare(`
+      UPDATE room_members SET last_active_at = ? WHERE room_id = ? AND session_token = ?
+    `).run(now, room.id, token)
+    lobbyChanged = true
+  }
+
+  if (lobbyChanged) broadcastMultiplayerLobby(room.id)
+}
+
 const handleLobbyMessage = (socket, token, message) => {
   if (handleRoomDirectoryMessage(socket, token, message)) return
-  if (roomStore.getMembership(token)) return
+  const membership = roomStore.getMembership(token)
+  if (membership) {
+    handleMultiplayerLobbyMessage(socket, token, message, membership)
+    return
+  }
   if (!legacySingleRoom) return
   const room = roomRow()
   const session = database.prepare('SELECT * FROM sessions WHERE token = ?').get(token)

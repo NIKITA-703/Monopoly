@@ -98,6 +98,23 @@ try {
     message.lobby.seats.filter((seat) => seat.playerId).length === 2)
   assert.ok(sharedLobby.lobby.seats[1].nickname)
 
+  send(first, { type: 'set_ready', ready: true, requestId: 'first-player-ready' })
+  const readyLobby = await waitFor(first.socket, (message) =>
+    message.type === 'lobby' && message.lobby.id === firstLobby.lobby.id && message.session.ready === true)
+  assert.equal(readyLobby.lobby.seats[0].ready, true, 'Готовность должна сохраняться внутри выбранной комнаты')
+
+  send(second, { type: 'set_nickname', nickname: 'Второй игрок', requestId: 'rename-second-player' })
+  const renamedLobby = await waitFor(first.socket, (message) =>
+    message.type === 'lobby' && message.lobby.id === firstLobby.lobby.id &&
+    message.lobby.seats[1].nickname === 'Второй игрок')
+  assert.equal(renamedLobby.lobby.seats[1].ready, false)
+
+  send(second, { type: 'claim_seat', seat: 3, requestId: 'move-second-player' })
+  const movedLobby = await waitFor(first.socket, (message) =>
+    message.type === 'lobby' && message.lobby.id === firstLobby.lobby.id &&
+    message.lobby.seats[3].nickname === 'Второй игрок')
+  assert.equal(movedLobby.lobby.seats[1].nickname, null)
+
   send(third, {
     type: 'create_room', name: 'Другая комната', visibility: 'public', requestId: 'create-public-room',
   })
@@ -118,7 +135,7 @@ try {
   const reconnected = await connect({ token: second.token })
   const restoredLobby = await waitFor(reconnected.socket, (message) =>
     message.type === 'lobby' && message.lobby.id === firstLobby.lobby.id)
-  assert.equal(restoredLobby.session.seat, 1)
+  assert.equal(restoredLobby.session.seat, 3)
   assert.equal(restoredLobby.lobby.code, firstLobby.lobby.code)
 
   const roomDatabase = new DatabaseSync(join(dataDirectory, 'monopoly.sqlite'), { readOnly: true })
