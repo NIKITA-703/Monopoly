@@ -17,7 +17,8 @@ const server = spawn(process.execPath, ['server/index.mjs'], {
   env: {
     ...process.env,
     PORT: String(port),
-    GAME_PASSWORD: 'integration',
+      GAME_PASSWORD: 'integration',
+      LEGACY_SINGLE_ROOM: '1',
     TURN_SECONDS: '5',
     AUCTION_SECONDS: '2',
     LOBBY_DISCONNECT_SECONDS: '1',

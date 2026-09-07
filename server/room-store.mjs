@@ -175,12 +175,54 @@ export const createRoomStore = (database, options = {}) => {
     return getMembership(sessionToken)
   }
 
+  const leaveRoom = (sessionToken) => {
+    const membership = getMembership(sessionToken)
+    if (!membership) return { roomId: null, closed: false, newLeaderToken: null }
+    const room = getRoom(membership.room_id)
+    if (!room) return { roomId: membership.room_id, closed: true, newLeaderToken: null }
+    if (room.status !== 'lobby') throw new Error('room_already_playing')
+
+    const timestamp = now()
+    let closed = false
+    let newLeaderToken = room.leader_token
+    database.exec('BEGIN IMMEDIATE')
+    try {
+      database.prepare('DELETE FROM room_members WHERE room_id = ? AND session_token = ?')
+        .run(room.id, sessionToken)
+      if (room.leader_token === sessionToken) {
+        const successor = database.prepare(`
+          SELECT session_token FROM room_members
+          WHERE room_id = ?
+          ORDER BY joined_at, seat
+          LIMIT 1
+        `).get(room.id)
+        if (successor) {
+          newLeaderToken = successor.session_token
+          database.prepare('UPDATE rooms SET leader_token = ?, updated_at = ? WHERE id = ?')
+            .run(newLeaderToken, timestamp, room.id)
+        } else {
+          database.prepare('DELETE FROM rooms WHERE id = ?').run(room.id)
+          newLeaderToken = null
+          closed = true
+        }
+      } else {
+        database.prepare('UPDATE rooms SET updated_at = ? WHERE id = ?').run(timestamp, room.id)
+      }
+      database.exec('COMMIT')
+    } catch (error) {
+      database.exec('ROLLBACK')
+      throw error
+    }
+    return { roomId: room.id, closed, newLeaderToken }
+  }
+
   return {
     createRoom,
     findRoomByCode,
     getMembership,
     getRoom,
     joinRoom,
+    leaveRoom,
     listMembers,
     verifyRoomPassword: (room, password) => verifyPasswordHash(password, room?.password_hash),
   }

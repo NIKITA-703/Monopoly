@@ -57,5 +57,14 @@ assert.throws(
   /already_in_room/,
 )
 
+const transferredRoomId = secondRoom.id
+const leaderExit = store.leaveRoom('leader-b')
+assert.equal(leaderExit.closed, false)
+assert.equal(leaderExit.newLeaderToken, 'player-g')
+assert.equal(store.getRoom(transferredRoomId).leader_token, 'player-g')
+const lastExit = store.leaveRoom('player-g')
+assert.equal(lastExit.closed, true)
+assert.equal(store.getRoom(transferredRoomId), undefined)
+
 database.close()
 console.log('Room store: OK')

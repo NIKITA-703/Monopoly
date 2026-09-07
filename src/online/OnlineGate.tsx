@@ -379,9 +379,14 @@ export default function OnlineGate() {
           </div>
           <div className="lobby-header-actions">
             {online.lobby.code ? (
-              <button type="button" className="copy-invite-button" onClick={copyInvite}>
-                {copiedInvite ? 'Ссылка скопирована' : 'Скопировать приглашение'}
-              </button>
+              <>
+                <button type="button" className="leave-room-button" onClick={online.leaveRoom}>
+                  Выйти
+                </button>
+                <button type="button" className="copy-invite-button" onClick={copyInvite}>
+                  {copiedInvite ? 'Ссылка скопирована' : 'Скопировать приглашение'}
+                </button>
+              </>
             ) : null}
             <span className="lobby-capacity">{players.length}/5 игроков</span>
           </div>

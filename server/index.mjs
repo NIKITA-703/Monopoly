@@ -90,6 +90,7 @@ database.prepare('UPDATE sessions SET connected = 0').run()
 const port = Number(process.env.PORT ?? 3001)
 const host = process.env.HOST ?? '0.0.0.0'
 const configuredPassword = process.env.GAME_PASSWORD ?? 'monopoly'
+const legacySingleRoom = process.env.LEGACY_SINGLE_ROOM === '1'
 const sessionSecret = process.env.SESSION_SECRET ?? configuredPassword
 const debugOnline = process.env.DEBUG_ONLINE === '1'
 const passwordDigest = createHash('sha256').update(configuredPassword).digest()
@@ -110,6 +111,7 @@ const idempotentMessageTypes = new Set([
   'set_ready',
   'create_room',
   'join_room',
+  'leave_room',
   'turn_action_started',
   'game_event',
   'chat_message',
@@ -202,6 +204,7 @@ const lobbyState = () => {
 }
 
 const broadcastLobby = () => {
+  if (!legacySingleRoom) return
   const lobby = lobbyState()
   for (const [socket, token] of clients) {
     if (roomStore.getMembership(token)) continue
@@ -611,10 +614,12 @@ const authenticate = (socket, payload) => {
       sendStoredGameState(socket, multiplayerRoom.game_id)
     }
   } else {
-    broadcastLobby()
     send(socket, { type: 'room_home' })
-    const room = roomRow()
-    if (room.status === 'playing' && room.game_id) sendStoredGameState(socket, room.game_id)
+    if (legacySingleRoom) {
+      broadcastLobby()
+      const room = roomRow()
+      if (room.status === 'playing' && room.game_id) sendStoredGameState(socket, room.game_id)
+    }
   }
   return true
 }
@@ -632,8 +637,20 @@ const roomActionMessages = {
 }
 
 const handleRoomDirectoryMessage = (socket, token, message) => {
-  if (message.type !== 'create_room' && message.type !== 'join_room') return false
+  if (!['create_room', 'join_room', 'leave_room'].includes(message.type)) return false
   try {
+    if (message.type === 'leave_room') {
+      const result = roomStore.leaveRoom(token)
+      auditLog.write('room_left', {
+        roomId: result.roomId,
+        playerId: publicPlayerId(token),
+        roomClosed: result.closed,
+        leaderPlayerId: result.newLeaderToken ? publicPlayerId(result.newLeaderToken) : null,
+      })
+      send(socket, { type: 'room_home' })
+      if (result.roomId && !result.closed) broadcastMultiplayerLobby(result.roomId)
+      return true
+    }
     const room = message.type === 'create_room'
       ? roomStore.createRoom({
           leaderToken: token,
@@ -665,6 +682,7 @@ const handleRoomDirectoryMessage = (socket, token, message) => {
 const handleLobbyMessage = (socket, token, message) => {
   if (handleRoomDirectoryMessage(socket, token, message)) return
   if (roomStore.getMembership(token)) return
+  if (!legacySingleRoom) return
   const room = roomRow()
   const session = database.prepare('SELECT * FROM sessions WHERE token = ?').get(token)
   if (!session) return
@@ -1210,13 +1228,18 @@ webSocketServer.on('connection', (socket, request) => {
         }
         broadcastMultiplayerLobby(membership.room_id)
       } else {
-        const room = roomRow()
-        database.prepare(`
-          UPDATE sessions SET connected = 0, ready = CASE WHEN ? = 'lobby' THEN 0 ELSE ready END, last_seen = ?
-          WHERE token = ?
-        `).run(room.status, Date.now(), token)
-        if (room.status === 'lobby') reconcileCountdown()
-        broadcastLobby()
+        if (legacySingleRoom) {
+          const room = roomRow()
+          database.prepare(`
+            UPDATE sessions SET connected = 0, ready = CASE WHEN ? = 'lobby' THEN 0 ELSE ready END, last_seen = ?
+            WHERE token = ?
+          `).run(room.status, Date.now(), token)
+          if (room.status === 'lobby') reconcileCountdown()
+          broadcastLobby()
+        } else {
+          database.prepare('UPDATE sessions SET connected = 0, last_seen = ? WHERE token = ?')
+            .run(Date.now(), token)
+        }
       }
     }
   })
@@ -1236,6 +1259,7 @@ heartbeatTimer.unref()
 webSocketServer.on('close', () => clearInterval(heartbeatTimer))
 
 setInterval(() => {
+  if (!legacySingleRoom) return
   if (roomRow().status !== 'lobby') return
   const now = Date.now()
   const disconnectedBefore = now - lobbyDisconnectDuration
@@ -1263,6 +1287,7 @@ setInterval(() => {
 }, 60 * 60 * 1000).unref()
 
 setInterval(() => {
+  if (!legacySingleRoom) return
   const room = roomRow()
   if (room.status !== 'playing' || !room.game_id) return
   const game = database.prepare('SELECT state_json, turn_key, turn_deadline FROM games WHERE id = ?').get(room.game_id)

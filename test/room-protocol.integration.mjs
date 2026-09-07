@@ -123,6 +123,13 @@ try {
   assert.ok(audit.includes('room_joined'))
   assert.ok(!audit.includes('room-secret'), 'Пароль комнаты не должен попадать в журнал')
 
+  queues.set(first.socket, queues.get(first.socket).filter((message) => message.type !== 'room_home'))
+  send(first, { type: 'leave_room', requestId: 'leader-leaves-room' })
+  await waitFor(first.socket, (message) => message.type === 'room_home')
+  const transferredLeadership = await waitFor(reconnected.socket, (message) =>
+    message.type === 'lobby' && message.lobby.id === firstLobby.lobby.id && message.session.isLeader)
+  assert.equal(transferredLeadership.lobby.leaderPlayerId, transferredLeadership.session.playerId)
+
   first.socket.close()
   reconnected.socket.close()
   third.socket.close()
