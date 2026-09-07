@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import assert from 'node:assert/strict'
 import WebSocket from 'ws'
 import { createAuditLog } from '../server/audit-log.mjs'
+import { validateAuctionTransition } from '../server/game-state-validation.mjs'
 
 const port = 3100 + Math.floor(Math.random() * 500)
 const expectedVersion = JSON.parse(readFileSync('package.json', 'utf8')).version
@@ -80,6 +81,56 @@ const connect = async (auth = {}) => {
 const send = (client, message) => client.socket.send(JSON.stringify(message))
 
 try {
+  const soleAuctionState = {
+    players: [
+      { id: 'seller', money: 1000 },
+      { id: 'only-bidder', money: 2000 },
+    ],
+    activePlayerIndex: 0,
+    owners: {},
+    propertyLevels: {},
+    mortgagedPropertyIds: [],
+    mortgageExpiryTurns: {},
+    eliminatedPlayerIds: [],
+    auction: {
+      tileId: 1,
+      participantIds: ['only-bidder'],
+      activeBidderId: 'only-bidder',
+      currentBid: 600,
+      highestBidderId: null,
+      passedIds: [],
+    },
+  }
+  const soleAuctionPurchase = {
+    ...soleAuctionState,
+    players: soleAuctionState.players.map((player) =>
+      player.id === 'only-bidder' ? { ...player, money: 1300 } : player),
+    owners: { 1: 'only-bidder' },
+    auction: null,
+  }
+  assert.equal(
+    validateAuctionTransition(soleAuctionState, soleAuctionPurchase),
+    null,
+    'Единственный участник должен купить поле ровно за стартовую цену +100k',
+  )
+  assert.equal(
+    validateAuctionTransition(soleAuctionState, {
+      ...soleAuctionPurchase,
+      players: soleAuctionState.players.map((player) =>
+        player.id === 'only-bidder' ? { ...player, money: 1200 } : player),
+    }),
+    'invalid_auction_balance',
+    'Единственный участник не должен самостоятельно повышать цену больше чем на 100k',
+  )
+  assert.equal(
+    validateAuctionTransition(soleAuctionState, {
+      ...soleAuctionState,
+      auction: { ...soleAuctionState.auction, currentBid: 700, highestBidderId: 'only-bidder' },
+    }),
+    'invalid_auction_action',
+    'Единственный участник не должен продолжать торги сам с собой',
+  )
+
   const auditTest = createAuditLog({ directory: auditTestDirectory })
   auditTest.write('redaction_test', {
     gameId: 'test-game',

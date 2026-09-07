@@ -2260,6 +2260,10 @@ button.secondary {
   gap: 12px;
 }
 
+.auction-controls.sole-bidder {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .decision-waiting-message {
   margin-top: 14px;
   padding: 12px;

@@ -657,6 +657,15 @@ function App({
   const canLocalPlayerBidAtAuction = !localPlayerId || localPlayerId === auction?.activeBidderId
   const auctionTile = auction ? brandTiles.find((tile) => tile.id === auction.tileId) ?? null : null
   const auctionBidder = auction ? players.find((player) => player.id === auction.activeBidderId) ?? null : null
+  const remainingAuctionBidderIds = auction
+    ? auction.participantIds.filter((id) => !auction.passedIds.includes(id) && !eliminatedPlayerIds.includes(id))
+    : []
+  const isSoleAuctionDecision = Boolean(
+    auction &&
+    auction.highestBidderId === null &&
+    remainingAuctionBidderIds.length === 1 &&
+    remainingAuctionBidderIds[0] === auction.activeBidderId,
+  )
   const paymentPayer = pendingPayment
     ? players.find((player) => player.id === pendingPayment.payerId) ?? null
     : null
@@ -1373,7 +1382,7 @@ function App({
   const placeAuctionBid = () => {
     if (!auction || !auctionTile || !auctionBidder || (!serverForcedActionRef.current && localPlayerId && localPlayerId !== auctionBidder.id)) return
 
-    const increase = Math.floor(Number(auctionBid))
+    const increase = isSoleAuctionDecision ? auctionIncrement : Math.floor(Number(auctionBid))
     const bid = auction.currentBid + increase
     if (!Number.isFinite(increase) || increase < auctionIncrement || bid > auctionBidder.money) return
 
@@ -3254,48 +3263,57 @@ function App({
                 </div>
               </div>
               <div className="auction-status">
-                <span>{auction.highestBidderId ? 'Текущая ставка' : 'Стартовая цена поля'}</span>
+                <span>{isSoleAuctionDecision ? 'Цена покупки без торгов' : auction.highestBidderId ? 'Текущая ставка' : 'Стартовая цена поля'}</span>
                 <strong className="auction-bid-preview">
                   <span>{money(auction.currentBid)}</span>
-                  {Number(auctionBid) > 0 ? (
+                  {(isSoleAuctionDecision || Number(auctionBid) > 0) ? (
                     <>
                       <i aria-hidden="true">→</i>
-                      <b>{money(auction.currentBid + Math.floor(Number(auctionBid)))}</b>
+                      <b>{money(auction.currentBid + (isSoleAuctionDecision ? auctionIncrement : Math.floor(Number(auctionBid))))}</b>
                     </>
                   ) : null}
                 </strong>
-                <small>Минимальное повышение: {money(auctionIncrement)}</small>
+                <small>
+                  {isSoleAuctionDecision
+                    ? `Фиксированная добавка: ${money(auctionIncrement)}`
+                    : `Минимальное повышение: ${money(auctionIncrement)}`}
+                </small>
                 <span>
                   Ход: <b style={{ color: auctionBidder.color }}>{auctionBidder.name}</b>
                 </span>
               </div>
               {canLocalPlayerBidAtAuction ? (
-                <div className="auction-controls">
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  value={auctionBid}
-                  onChange={(event) => {
-                    const digits = event.target.value.replace(/\D/g, '')
-                    const maximumIncrease = Math.max(0, auctionBidder.money - auction.currentBid)
-                    setAuctionBid(digits ? String(Math.min(Number(digits), maximumIncrease)) : '')
-                  }}
-                  onBlur={() => {
-                    if (Number(auctionBid) < auctionIncrement) setAuctionBid(String(auctionIncrement))
-                  }}
-                  aria-label="Повышение ставки"
-                />
+                <div className={isSoleAuctionDecision ? 'auction-controls sole-bidder' : 'auction-controls'}>
+                {!isSoleAuctionDecision ? (
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={auctionBid}
+                    onChange={(event) => {
+                      const digits = event.target.value.replace(/\D/g, '')
+                      const maximumIncrease = Math.max(0, auctionBidder.money - auction.currentBid)
+                      setAuctionBid(digits ? String(Math.min(Number(digits), maximumIncrease)) : '')
+                    }}
+                    onBlur={() => {
+                      if (Number(auctionBid) < auctionIncrement) setAuctionBid(String(auctionIncrement))
+                    }}
+                    aria-label="Повышение ставки"
+                  />
+                ) : null}
                 <button
                   type="button"
                   className="auction-button"
                   onClick={placeAuctionBid}
                   disabled={
-                    Number(auctionBid) < auctionIncrement ||
-                    auction.currentBid + Number(auctionBid) > auctionBidder.money
+                    (isSoleAuctionDecision ? auctionIncrement : Number(auctionBid)) < auctionIncrement ||
+                    auction.currentBid + (isSoleAuctionDecision ? auctionIncrement : Number(auctionBid)) > auctionBidder.money
                   }
                 >
-                  Ставка {money(auction.currentBid + Math.max(0, Math.floor(Number(auctionBid) || 0)))}
+                  {isSoleAuctionDecision ? 'Купить' : 'Ставка'}{' '}
+                  {money(auction.currentBid + (isSoleAuctionDecision
+                    ? auctionIncrement
+                    : Math.max(0, Math.floor(Number(auctionBid) || 0))))}
                 </button>
                 <button type="button" className="quiet-button" onClick={passAuction}>
                   Пас

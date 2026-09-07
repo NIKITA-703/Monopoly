@@ -337,6 +337,11 @@ export const validateAuctionTransition = (previous, next) => {
     ) return 'invalid_auction_creation'
     return null
   }
+  const eliminatedIds = new Set(previous.eliminatedPlayerIds ?? [])
+  const remainingBidderIds = auction.participantIds.filter((id) =>
+    !auction.passedIds.includes(id) && !eliminatedIds.has(id))
+  const isSoleAuctionDecision = auction.highestBidderId == null &&
+    remainingBidderIds.length === 1 && remainingBidderIds[0] === auction.activeBidderId
   if (next.auction) {
     if (
       !sameRecord(previous.owners, next.owners) ||
@@ -350,6 +355,7 @@ export const validateAuctionTransition = (previous, next) => {
     const passed = next.auction.currentBid === auction.currentBid &&
       next.auction.passedIds.includes(bidderId)
     if (!placedBid && !passed) return 'invalid_auction_action'
+    if (placedBid && isSoleAuctionDecision) return 'invalid_auction_action'
     return null
   }
 
@@ -376,6 +382,7 @@ export const validateAuctionTransition = (previous, next) => {
     !Number.isSafeInteger(winningBid) ||
     winningBid < auction.currentBid ||
     (winsWithNewBid && winningBid < auction.currentBid + 100) ||
+    (winsWithNewBid && isSoleAuctionDecision && winningBid !== auction.currentBid + 100) ||
     (!winsWithNewBid && winnerId !== auction.highestBidderId) ||
     nextWinner.money !== winner.money - winningBid ||
     playerMoneyChanged(previous, next, [winnerId])
