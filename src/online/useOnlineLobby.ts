@@ -16,7 +16,7 @@ const webSocketUrl = () => {
   return `${protocol}//${window.location.host}/ws`
 }
 
-type ConnectionStatus = 'connecting' | 'password' | 'online' | 'offline' | 'replaced'
+type ConnectionStatus = 'connecting' | 'online' | 'offline' | 'replaced'
 
 const inviteRoomCode = new URLSearchParams(window.location.search)
   .get('room')?.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) ?? ''
@@ -24,9 +24,7 @@ const inviteRoomCode = new URLSearchParams(window.location.search)
 export function useOnlineLobby() {
   const socketRef = useRef<WebSocket | null>(null)
   const reconnectTimerRef = useRef<number | null>(null)
-  const passwordRef = useRef('')
   const playerIdRef = useRef<string | null>(null)
-  const passwordScreenRef = useRef(false)
   const sessionEstablishedRef = useRef(false)
   const receivedGameEventIdsRef = useRef(new Set<string>())
   const pendingGameEventIdsRef = useRef(new Set<string>())
@@ -112,7 +110,7 @@ export function useOnlineLobby() {
 
     const connect = () => {
       if (disposed || replacedByAnotherTab) return
-      setStatus((current) => current === 'password' ? current : 'connecting')
+      setStatus('connecting')
       const socket = new WebSocket(webSocketUrl())
       socketRef.current = socket
 
@@ -121,14 +119,8 @@ export function useOnlineLobby() {
         const token = window.sessionStorage.getItem(sessionStorageKey)
           ?? window.localStorage.getItem(persistentSessionStorageKey)
         if (token) {
-          passwordScreenRef.current = false
           socket.send(JSON.stringify({ type: 'auth', token }))
-        } else if (passwordRef.current) {
-          passwordScreenRef.current = false
-          socket.send(JSON.stringify({ type: 'auth', password: passwordRef.current }))
         } else {
-          // Общая HttpOnly-cookie подтверждает доступ к комнате, а сервер
-          // выдаёт этой вкладке отдельную игровую сессию.
           socket.send(JSON.stringify({ type: 'auth' }))
         }
       })
@@ -136,10 +128,8 @@ export function useOnlineLobby() {
       socket.addEventListener('message', (event) => {
         const message = JSON.parse(String(event.data)) as ServerMessage
         if (message.type === 'auth_ok') {
-          passwordScreenRef.current = false
           window.sessionStorage.setItem(sessionStorageKey, message.token)
           window.localStorage.setItem(persistentSessionStorageKey, message.token)
-          passwordRef.current = ''
           setError('')
           setStatus('online')
           socket.send(JSON.stringify({
@@ -149,11 +139,10 @@ export function useOnlineLobby() {
           return
         }
         if (message.type === 'auth_error') {
-          passwordScreenRef.current = true
           window.sessionStorage.removeItem(sessionStorageKey)
           window.localStorage.removeItem(persistentSessionStorageKey)
           setError(message.message)
-          setStatus('password')
+          setStatus('offline')
           return
         }
         if (message.type === 'action_error') {
@@ -323,7 +312,7 @@ export function useOnlineLobby() {
           setStatus('replaced')
           return
         }
-        setStatus(passwordScreenRef.current ? 'password' : sessionEstablishedRef.current ? 'offline' : 'connecting')
+        setStatus(sessionEstablishedRef.current ? 'offline' : 'connecting')
         reconnectTimerRef.current = window.setTimeout(connect, reconnectDelay)
         reconnectDelay = Math.min(reconnectDelay * 2, 5000)
       })
@@ -338,32 +327,6 @@ export function useOnlineLobby() {
     }
   }, [send])
 
-  const authenticate = async (password: string) => {
-    passwordScreenRef.current = false
-    passwordRef.current = password
-    setError('')
-    try {
-      const response = await fetch('/api/access', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password }),
-      })
-      const result = await response.json() as { ok?: boolean; message?: string }
-      if (!response.ok || !result.ok) {
-        passwordScreenRef.current = true
-        passwordRef.current = ''
-        setError(result.message ?? 'Неверный пароль')
-        setStatus('password')
-        return
-      }
-      send({ type: 'auth', password })
-    } catch {
-      passwordScreenRef.current = true
-      setError('Не удалось связаться с сервером')
-      setStatus('password')
-    }
-  }
   const publishGameState = useCallback((state: unknown) => {
     const timeoutId = pendingTimeoutIdRef.current
     send({ type: 'game_snapshot', state, ...(timeoutId ? { timeoutId } : {}) })
@@ -401,7 +364,6 @@ export function useOnlineLobby() {
     turnTimeout,
     gameEvent: gameEvents[0] ?? null,
     acknowledgeGameEvent,
-    authenticate,
     createRoom: (details: { name: string; visibility: 'public' | 'private'; password: string }) => {
       setError('')
       send({ type: 'create_room', ...details })

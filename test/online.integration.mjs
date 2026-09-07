@@ -17,7 +17,6 @@ const server = spawn(process.execPath, ['server/index.mjs'], {
   env: {
     ...process.env,
     PORT: String(port),
-      GAME_PASSWORD: 'integration',
       LEGACY_SINGLE_ROOM: '1',
     TURN_SECONDS: '5',
     AUCTION_SECONDS: '2',
@@ -67,7 +66,7 @@ const waitFor = (socket, predicate, timeout = 8000) => {
     }, timeout)
   })
 }
-const connect = async (auth) => {
+const connect = async (auth = {}) => {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`)
   track(socket)
   await new Promise((resolve, reject) => {
@@ -102,24 +101,12 @@ try {
     'Версии package.json и сервера должны совпадать',
   )
 
-  const accessResponse = await fetch(`http://127.0.0.1:${port}/api/access`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ password: 'integration' }),
-  })
-  assert.equal(accessResponse.status, 200, 'Пароль должен создавать cookie доступа')
-  const accessCookie = accessResponse.headers.get('set-cookie')?.split(';')[0]
-  assert.ok(accessCookie, 'Сервер должен вернуть cookie доступа')
-  const cookieSocket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { cookie: accessCookie } })
-  track(cookieSocket)
-  await once(cookieSocket, 'open')
-  cookieSocket.send(JSON.stringify({ type: 'auth' }))
-  const cookieAuth = await waitFor(cookieSocket, (message) => message.type === 'auth_ok')
-  assert.ok(cookieAuth.token, 'Новая вкладка должна войти по cookie без повторного пароля')
-  cookieSocket.close()
+  const anonymous = await connect()
+  assert.ok(anonymous.token, 'Новая вкладка должна получить сессию без общего пароля сервера')
+  anonymous.socket.close()
 
-  const first = await connect({ password: 'integration' })
-  const second = await connect({ password: 'integration' })
+  const first = await connect()
+  const second = await connect()
   send(first, { type: 'claim_seat', seat: 0 })
   send(second, { type: 'claim_seat', seat: 1 })
   send(first, { type: 'set_nickname', nickname: 'Н' })
@@ -127,7 +114,7 @@ try {
     message.type === 'lobby' && message.lobby.seats[0]?.nickname === 'Н')
   assert.equal(renamedLobby.lobby.seats[0].ready, false, 'Смена ника должна снимать готовность')
 
-  const temporary = await connect({ password: 'integration' })
+  const temporary = await connect()
   send(temporary, { type: 'claim_seat', seat: 2 })
   await waitFor(first.socket, (message) => message.type === 'lobby' && message.lobby.seats[2]?.playerId)
   temporary.socket.close()
@@ -144,7 +131,7 @@ try {
     send(first, { type: 'lobby_activity' })
     send(second, { type: 'lobby_activity' })
   }, 500)
-  const idle = await connect({ password: 'integration' })
+  const idle = await connect()
   send(idle, { type: 'claim_seat', seat: 2 })
   const idleLobby = await waitFor(first.socket, (message) =>
     message.type === 'lobby' && message.lobby.seats[2]?.playerId)
@@ -154,9 +141,9 @@ try {
   clearInterval(keepLobbyAlive)
   idle.socket.close()
 
-  const third = await connect({ password: 'integration' })
-  const fourth = await connect({ password: 'integration' })
-  const fifth = await connect({ password: 'integration' })
+  const third = await connect()
+  const fourth = await connect()
+  const fifth = await connect()
   send(third, { type: 'claim_seat', seat: 2 })
   send(fourth, { type: 'claim_seat', seat: 3 })
   send(fifth, { type: 'claim_seat', seat: 4 })

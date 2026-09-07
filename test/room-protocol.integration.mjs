@@ -11,7 +11,7 @@ const port = 3600 + Math.floor(Math.random() * 400)
 const dataDirectory = mkdtempSync(join(tmpdir(), 'monopoly-rooms-'))
 const server = spawn(process.execPath, ['server/index.mjs'], {
   cwd: process.cwd(),
-  env: { ...process.env, PORT: String(port), GAME_PASSWORD: 'integration', DATA_DIR: dataDirectory },
+  env: { ...process.env, PORT: String(port), DATA_DIR: dataDirectory },
   stdio: ['ignore', 'pipe', 'inherit'],
 })
 
@@ -44,7 +44,7 @@ const waitFor = (socket, predicate, timeout = 5000) => {
   })
 }
 
-const connect = async (auth) => {
+const connect = async (auth = {}) => {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`)
   track(socket)
   await once(socket, 'open')
@@ -66,10 +66,10 @@ try {
     })
   })
 
-  const first = await connect({ password: 'integration' })
-  const second = await connect({ password: 'integration' })
-  const third = await connect({ password: 'integration' })
-  const spectator = await connect({ password: 'integration' })
+  const first = await connect()
+  const second = await connect()
+  const third = await connect()
+  const spectator = await connect()
   await waitFor(spectator.socket, (message) => message.type === 'room_home')
 
   send(first, {

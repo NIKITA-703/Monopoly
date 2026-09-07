@@ -47,7 +47,6 @@ function VersionStatus({ serverVersion }: { serverVersion: string | null }) {
 export default function OnlineGate() {
   const online = useOnlineLobby()
   const { reportLobbyActivity } = online
-  const [password, setPassword] = useState('')
   const [roomMode, setRoomMode] = useState<'create' | 'join'>(() => online.inviteRoomCode ? 'join' : 'create')
   const [roomName, setRoomName] = useState('Моя комната')
   const [roomVisibility, setRoomVisibility] = useState<'public' | 'private'>('private')
@@ -119,11 +118,6 @@ export default function OnlineGate() {
     ? now === 0 ? 3 : Math.max(0, Math.ceil((online.lobby.countdownEndsAt - now) / 1000))
     : null
 
-  const submitPassword = (event: FormEvent) => {
-    event.preventDefault()
-    if (password.trim()) online.authenticate(password)
-  }
-
   const submitRoom = (event: FormEvent) => {
     event.preventDefault()
     if (roomMode === 'create') {
@@ -153,37 +147,12 @@ export default function OnlineGate() {
     )
   }
 
-  if (online.status === 'password') {
-    return (
-      <main className="online-screen">
-        <form className="access-card" onSubmit={submitPassword}>
-          <span className="access-kicker">Monopoly Online</span>
-          <h1>Введите пароль</h1>
-          <p>Пароль защищает игровой сервер от случайных посетителей и ботов.</p>
-          <input
-            autoFocus
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            placeholder="Пароль сервера"
-            autoComplete="current-password"
-          />
-          {online.error ? <span className="online-error">{online.error}</span> : null}
-          <button type="submit">Войти</button>
-        </form>
-        <VersionStatus serverVersion={serverVersion} />
-      </main>
-    )
-  }
-
   if (online.roomHome) {
     return (
       <main className="online-screen room-home-screen">
         <section className="room-home-card room-browser">
           <header className="room-home-header">
             <span className="access-kicker">Monopoly Online</span>
-            <h1>Игровые комнаты</h1>
-            <p>Создайте свою комнату или присоединитесь к уже открытой партии.</p>
           </header>
 
           <div className="room-browser-layout">

@@ -76,8 +76,6 @@ cp .env.example .env
 Пример `.env`:
 
 ```dotenv
-GAME_PASSWORD=change-me
-SESSION_SECRET=replace-with-a-long-random-secret
 HOST=127.0.0.1
 PORT=3001
 TURN_SECONDS=70
@@ -95,8 +93,6 @@ DATA_DIR=./data
 
 | Переменная | Назначение |
 | --- | --- |
-| `GAME_PASSWORD` | Пароль для входа в игровую комнату |
-| `SESSION_SECRET` | Секрет подписи cookie доступа; на VPS задайте длинную случайную строку и не меняйте её между перезапусками |
 | `HOST` | Адрес, который слушает Node.js-сервер |
 | `PORT` | Порт Node.js-сервера |
 | `TURN_SECONDS` | Время обычного хода |
@@ -208,8 +204,6 @@ sudo chmod 600 /etc/monopoly.env
 Production-конфигурация должна выглядеть примерно так:
 
 ```dotenv
-GAME_PASSWORD=замените-на-длинный-пароль
-SESSION_SECRET=замените-на-длинную-случайную-строку
 HOST=127.0.0.1
 PORT=3001
 TURN_SECONDS=70

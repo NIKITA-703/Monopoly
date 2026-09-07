@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { extname, join, normalize } from 'node:path'
@@ -89,13 +89,8 @@ database.prepare('UPDATE sessions SET connected = 0').run()
 
 const port = Number(process.env.PORT ?? 3001)
 const host = process.env.HOST ?? '0.0.0.0'
-const configuredPassword = process.env.GAME_PASSWORD ?? 'monopoly'
 const legacySingleRoom = process.env.LEGACY_SINGLE_ROOM === '1'
-const sessionSecret = process.env.SESSION_SECRET ?? configuredPassword
 const debugOnline = process.env.DEBUG_ONLINE === '1'
-const passwordDigest = createHash('sha256').update(configuredPassword).digest()
-const accessCookieName = 'monopoly_access'
-const accessCookieValue = createHmac('sha256', sessionSecret).update('monopoly-access-v1').digest('hex')
 const clients = new Map()
 const clientPresence = new Map()
 let countdownTimer = null
@@ -131,10 +126,6 @@ const auditLog = createAuditLog({
   maxFiles: Number(process.env.AUDIT_LOG_FILES ?? 5),
   maxAgeDays: Number(process.env.AUDIT_LOG_MAX_AGE_DAYS ?? 14),
 })
-
-if (!process.env.GAME_PASSWORD) {
-  console.warn('GAME_PASSWORD не задан. Для локальной разработки используется пароль: monopoly')
-}
 
 const mimeTypes = {
   '.css': 'text/css; charset=utf-8',
@@ -559,52 +550,11 @@ const reconcileCountdown = () => {
   broadcastLobby()
 }
 
-const verifyPassword = (value) => {
-  const candidate = createHash('sha256').update(String(value ?? '')).digest()
-  return candidate.length === passwordDigest.length && timingSafeEqual(candidate, passwordDigest)
-}
-
-const parseCookies = (header = '') => Object.fromEntries(
-  String(header).split(';').flatMap((part) => {
-    const separator = part.indexOf('=')
-    if (separator < 0) return []
-    return [[part.slice(0, separator).trim(), decodeURIComponent(part.slice(separator + 1).trim())]]
-  }),
-)
-
-const hasAccessCookie = (request) => {
-  const candidate = parseCookies(request.headers.cookie)[accessCookieName] ?? ''
-  const candidateBuffer = Buffer.from(candidate)
-  const expectedBuffer = Buffer.from(accessCookieValue)
-  return candidateBuffer.length === expectedBuffer.length && timingSafeEqual(candidateBuffer, expectedBuffer)
-}
-
-const readJsonBody = (request, maximumBytes = 4096) => new Promise((resolve, reject) => {
-  let body = ''
-  request.setEncoding('utf8')
-  request.on('data', (chunk) => {
-    body += chunk
-    if (body.length > maximumBytes) reject(new Error('request_too_large'))
-  })
-  request.on('end', () => {
-    try {
-      resolve(JSON.parse(body || '{}'))
-    } catch {
-      reject(new Error('invalid_json'))
-    }
-  })
-  request.on('error', reject)
-})
-
 const authenticate = (socket, payload) => {
   const requestedToken = typeof payload.token === 'string' ? payload.token : ''
   const existing = requestedToken
     ? database.prepare('SELECT token FROM sessions WHERE token = ?').get(requestedToken)
     : null
-  if (!existing && !socket.hasAccess && !verifyPassword(payload.password)) {
-    send(socket, { type: 'auth_error', message: 'Неверный пароль' })
-    return false
-  }
   const token = existing ? requestedToken : randomUUID()
   const now = Date.now()
 
@@ -1123,32 +1073,6 @@ const server = createServer(async (request, response) => {
     return
   }
 
-  if (request.url === '/api/access' && request.method === 'POST') {
-    try {
-      const body = await readJsonBody(request)
-      if (!verifyPassword(body.password)) {
-        response.writeHead(401, {
-          'content-type': 'application/json; charset=utf-8',
-          'cache-control': 'no-store',
-        })
-        response.end(JSON.stringify({ ok: false, message: 'Неверный пароль' }))
-        return
-      }
-      const forwardedProtocol = String(request.headers['x-forwarded-proto'] ?? '')
-      const secure = request.socket.encrypted || forwardedProtocol.split(',')[0].trim() === 'https'
-      response.writeHead(200, {
-        'content-type': 'application/json; charset=utf-8',
-        'cache-control': 'no-store',
-        'set-cookie': `${accessCookieName}=${encodeURIComponent(accessCookieValue)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000${secure ? '; Secure' : ''}`,
-      })
-      response.end(JSON.stringify({ ok: true }))
-    } catch {
-      response.writeHead(400, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
-      response.end(JSON.stringify({ ok: false, message: 'Некорректный запрос' }))
-    }
-    return
-  }
-
   if (request.url === '/api/health') {
     response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
     response.end(JSON.stringify({ ok: true, version: appVersion }))
@@ -1192,8 +1116,7 @@ const server = createServer(async (request, response) => {
 })
 
 const webSocketServer = new WebSocketServer({ server, path: '/ws', maxPayload: 1024 * 1024 })
-webSocketServer.on('connection', (socket, request) => {
-  socket.hasAccess = hasAccessCookie(request)
+webSocketServer.on('connection', (socket) => {
   socket.isAlive = true
   socket.on('pong', () => { socket.isAlive = true })
   const authTimeout = setTimeout(() => socket.close(4001, 'Authentication timeout'), 10000)
