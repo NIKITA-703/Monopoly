@@ -112,6 +112,7 @@ export const createRoomStore = (database, options = {}) => {
     if (typeof leaderToken !== 'string' || !leaderToken) throw new Error('invalid_session')
     if (getMembership(leaderToken)) throw new Error('already_in_room')
     if (visibility !== 'public' && visibility !== 'private') throw new Error('invalid_visibility')
+    if (visibility === 'private' && !String(password ?? '').trim()) throw new Error('room_password_required')
 
     let code = ''
     for (let attempt = 0; attempt < 20; attempt += 1) {

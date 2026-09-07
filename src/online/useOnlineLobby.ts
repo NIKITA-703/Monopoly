@@ -6,7 +6,7 @@ const sessionStorageKey = 'monopoly.online.session'
 const persistentSessionStorageKey = 'monopoly.online.player-session'
 const repeatProtectedMessageTypes = new Set([
   'claim_seat', 'leave_seat', 'set_nickname', 'set_ready', 'turn_action_started',
-  'game_event', 'chat_message', 'game_snapshot', 'return_to_lobby',
+  'create_room', 'join_room', 'game_event', 'chat_message', 'game_snapshot', 'return_to_lobby',
 ])
 type GameStateMessage = Extract<ServerMessage, { type: 'game_state' }>
 const webSocketUrl = () => {
@@ -17,6 +17,9 @@ const webSocketUrl = () => {
 }
 
 type ConnectionStatus = 'connecting' | 'password' | 'online' | 'offline' | 'replaced'
+
+const inviteRoomCode = new URLSearchParams(window.location.search)
+  .get('room')?.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) ?? ''
 
 export function useOnlineLobby() {
   const socketRef = useRef<WebSocket | null>(null)
@@ -34,9 +37,11 @@ export function useOnlineLobby() {
   const lastImmediateTradeSoundRef = useRef<string | null>(null)
   const lastImmediateAuctionSoundRef = useRef<string | null>(null)
   const recentRequestsRef = useRef(new Map<string, { requestId: string; sentAt: number }>())
+  const inviteAttemptedRef = useRef(false)
   const [status, setStatus] = useState<ConnectionStatus>('connecting')
   const [lobby, setLobby] = useState<LobbyState | null>(null)
   const [session, setSession] = useState<OnlineSession | null>(null)
+  const [roomHome, setRoomHome] = useState(false)
   const [error, setError] = useState('')
   const [gameState, setGameState] = useState<{ gameId: string; revision: number; state: unknown } | null>(null)
   const [turnDeadline, setTurnDeadline] = useState<number | null>(null)
@@ -154,11 +159,24 @@ export function useOnlineLobby() {
           setError(message.message)
           return
         }
+        if (message.type === 'room_home') {
+          sessionEstablishedRef.current = true
+          setLobby(null)
+          setSession(null)
+          setRoomHome(true)
+          setStatus('online')
+          if (inviteRoomCode && !inviteAttemptedRef.current) {
+            inviteAttemptedRef.current = true
+            send({ type: 'join_room', code: inviteRoomCode, password: '' })
+          }
+          return
+        }
         if (message.type === 'lobby') {
           sessionEstablishedRef.current = true
           playerIdRef.current = message.session?.playerId ?? null
           setLobby(message.lobby)
           setSession(message.session)
+          setRoomHome(false)
           setStatus('online')
           setError('')
           if (message.lobby.status !== 'playing') {
@@ -316,7 +334,7 @@ export function useOnlineLobby() {
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
       socketRef.current?.close()
     }
-  }, [])
+  }, [send])
 
   const authenticate = async (password: string) => {
     passwordScreenRef.current = false
@@ -372,6 +390,8 @@ export function useOnlineLobby() {
     status,
     lobby,
     session,
+    roomHome,
+    inviteRoomCode,
     error,
     gameState,
     turnDeadline,
@@ -379,6 +399,14 @@ export function useOnlineLobby() {
     gameEvent: gameEvents[0] ?? null,
     acknowledgeGameEvent,
     authenticate,
+    createRoom: (details: { name: string; visibility: 'public' | 'private'; password: string }) => {
+      setError('')
+      send({ type: 'create_room', ...details })
+    },
+    joinRoom: (code: string, password: string) => {
+      setError('')
+      send({ type: 'join_room', code, password })
+    },
     claimSeat: (seat: number) => send({ type: 'claim_seat', seat }),
     leaveSeat: () => send({ type: 'leave_seat' }),
     setNickname: (nickname: string) => send({ type: 'set_nickname', nickname }),

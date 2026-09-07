@@ -628,6 +628,7 @@ const roomActionMessages = {
   room_code_unavailable: 'Не удалось создать код комнаты. Попробуйте ещё раз',
   room_full: 'В комнате уже пять игроков',
   room_not_found: 'Комната с таким кодом не найдена',
+  room_password_required: 'Для закрытой комнаты задайте пароль',
 }
 
 const handleRoomDirectoryMessage = (socket, token, message) => {

@@ -12,6 +12,11 @@ const store = createRoomStore(database, {
   generateCode: () => codes.shift(),
 })
 
+assert.throws(
+  () => store.createRoom({ leaderToken: 'no-password', visibility: 'private' }),
+  /room_password_required/,
+)
+
 const firstRoom = store.createRoom({
   leaderToken: 'leader-a',
   name: '  Первая   комната  ',
