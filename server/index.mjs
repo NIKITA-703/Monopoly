@@ -275,6 +275,23 @@ const broadcastMultiplayerLobby = (roomId) => {
   }
 }
 
+const roomDirectoryState = () => roomStore.listPublicRooms().map((room) => ({
+  id: room.id,
+  code: room.code,
+  name: room.name,
+  status: room.status,
+  playerCount: Number(room.player_count),
+  capacity: 5,
+}))
+
+const sendRoomHome = (socket) => send(socket, { type: 'room_home', rooms: roomDirectoryState() })
+
+const broadcastRoomHome = () => {
+  for (const [socket, token] of clients) {
+    if (!roomStore.getMembership(token)) sendRoomHome(socket)
+  }
+}
+
 const sendStoredGameState = (socket, gameId) => {
   const game = database.prepare('SELECT state_json, updated_at, turn_deadline FROM games WHERE id = ?').get(gameId)
   if (!game?.state_json) return
@@ -614,7 +631,7 @@ const authenticate = (socket, payload) => {
       sendStoredGameState(socket, multiplayerRoom.game_id)
     }
   } else {
-    send(socket, { type: 'room_home' })
+    sendRoomHome(socket)
     if (legacySingleRoom) {
       broadcastLobby()
       const room = roomRow()
@@ -647,8 +664,9 @@ const handleRoomDirectoryMessage = (socket, token, message) => {
         roomClosed: result.closed,
         leaderPlayerId: result.newLeaderToken ? publicPlayerId(result.newLeaderToken) : null,
       })
-      send(socket, { type: 'room_home' })
+      sendRoomHome(socket)
       if (result.roomId && !result.closed) broadcastMultiplayerLobby(result.roomId)
+      broadcastRoomHome()
       return true
     }
     const room = message.type === 'create_room'
@@ -669,6 +687,7 @@ const handleRoomDirectoryMessage = (socket, token, message) => {
       playerId: publicPlayerId(token),
     })
     broadcastMultiplayerLobby(roomId)
+    broadcastRoomHome()
   } catch (error) {
     send(socket, {
       type: 'action_error',

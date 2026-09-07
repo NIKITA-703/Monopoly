@@ -28,6 +28,15 @@ export type OnlineSession = {
   isLeader?: boolean
 }
 
+export type RoomSummary = {
+  id: string
+  code: string
+  name: string
+  status: 'lobby' | 'playing'
+  playerCount: number
+  capacity: number
+}
+
 export type OnlineGameEvent =
   | { kind: 'dice-roll'; playerId: string; dice: [number, number] }
   | { kind: 'movement'; playerId: string; startPosition: number; steps: number; direction: 1 | -1 }
@@ -37,7 +46,7 @@ export type ServerMessage =
   | { type: 'auth_ok'; token: string }
   | { type: 'auth_error'; message: string }
   | { type: 'action_error'; message: string; code?: string }
-  | { type: 'room_home' }
+  | { type: 'room_home'; rooms: RoomSummary[] }
   | { type: 'lobby'; lobby: LobbyState; session: OnlineSession }
   | { type: 'game_state'; gameId: string; revision: number; turnDeadline: number | null; senderId?: string | null; state: unknown }
   | { type: 'turn_deadline'; gameId: string; turnDeadline: number | null }

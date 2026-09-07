@@ -52,6 +52,10 @@ assert.equal(secondRoom.name, 'Комната Monopoly')
 assert.equal(store.joinRoom({ sessionToken: 'player-g', code: 'ROOMB3' }).seat, 1)
 assert.equal(store.listMembers(firstRoom.id).length, 5)
 assert.equal(store.listMembers(secondRoom.id).length, 2)
+assert.deepEqual(
+  store.listPublicRooms().map((room) => [room.id, Number(room.player_count)]),
+  [[secondRoom.id, 2]],
+)
 assert.throws(
   () => store.joinRoom({ sessionToken: 'leader-b', code: 'ROOMA2', password: 'secret' }),
   /already_in_room/,

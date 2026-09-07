@@ -100,6 +100,21 @@ export const createRoomStore = (database, options = {}) => {
     ORDER BY seat
   `).all(roomId)
 
+  const listPublicRooms = () => database.prepare(`
+    SELECT
+      rooms.id,
+      rooms.code,
+      rooms.name,
+      rooms.status,
+      rooms.created_at,
+      COUNT(room_members.session_token) AS player_count
+    FROM rooms
+    LEFT JOIN room_members ON room_members.room_id = rooms.id
+    WHERE rooms.visibility = 'public'
+    GROUP BY rooms.id
+    ORDER BY rooms.created_at DESC
+  `).all()
+
   const nextFreeSeat = (roomId) => {
     const occupied = new Set(listMembers(roomId).map((member) => member.seat))
     for (let seat = 0; seat < maximumRoomPlayers; seat += 1) {
@@ -224,6 +239,7 @@ export const createRoomStore = (database, options = {}) => {
     joinRoom,
     leaveRoom,
     listMembers,
+    listPublicRooms,
     verifyRoomPassword: (room, password) => verifyPasswordHash(password, room?.password_hash),
   }
 }

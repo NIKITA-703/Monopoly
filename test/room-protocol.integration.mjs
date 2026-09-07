@@ -69,6 +69,8 @@ try {
   const first = await connect({ password: 'integration' })
   const second = await connect({ password: 'integration' })
   const third = await connect({ password: 'integration' })
+  const spectator = await connect({ password: 'integration' })
+  await waitFor(spectator.socket, (message) => message.type === 'room_home')
 
   send(first, {
     type: 'create_room',
@@ -102,6 +104,12 @@ try {
   const otherLobby = await waitFor(third.socket, (message) => message.type === 'lobby' && message.lobby.code)
   assert.notEqual(otherLobby.lobby.id, firstLobby.lobby.id)
   assert.equal(otherLobby.lobby.visibility, 'public')
+  const publicDirectory = await waitFor(spectator.socket, (message) =>
+    message.type === 'room_home' && message.rooms.some((room) => room.id === otherLobby.lobby.id))
+  assert.deepEqual(
+    publicDirectory.rooms.map((room) => [room.id, room.playerCount, room.capacity]),
+    [[otherLobby.lobby.id, 1, 5]],
+  )
   assert.ok(!queues.get(first.socket).some((message) => message.type === 'lobby' && message.lobby.id === otherLobby.lobby.id))
 
   second.socket.close()
@@ -133,6 +141,7 @@ try {
   first.socket.close()
   reconnected.socket.close()
   third.socket.close()
+  spectator.socket.close()
   console.log('Room protocol integration: OK')
 } finally {
   server.kill()

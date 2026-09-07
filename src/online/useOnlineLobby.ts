@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { LobbyState, OnlineGameEvent, OnlineSession, ServerMessage } from './types'
+import type { LobbyState, OnlineGameEvent, OnlineSession, RoomSummary, ServerMessage } from './types'
 import { playGameSound } from '../audio/gameAudio'
 
 const sessionStorageKey = 'monopoly.online.session'
@@ -42,6 +42,7 @@ export function useOnlineLobby() {
   const [lobby, setLobby] = useState<LobbyState | null>(null)
   const [session, setSession] = useState<OnlineSession | null>(null)
   const [roomHome, setRoomHome] = useState(false)
+  const [rooms, setRooms] = useState<RoomSummary[]>([])
   const [error, setError] = useState('')
   const [gameState, setGameState] = useState<{ gameId: string; revision: number; state: unknown } | null>(null)
   const [turnDeadline, setTurnDeadline] = useState<number | null>(null)
@@ -164,6 +165,7 @@ export function useOnlineLobby() {
           setLobby(null)
           setSession(null)
           setRoomHome(true)
+          setRooms(message.rooms)
           setStatus('online')
           if (inviteRoomCode && !inviteAttemptedRef.current) {
             inviteAttemptedRef.current = true
@@ -391,6 +393,7 @@ export function useOnlineLobby() {
     lobby,
     session,
     roomHome,
+    rooms,
     inviteRoomCode,
     error,
     gameState,

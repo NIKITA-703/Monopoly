@@ -179,96 +179,144 @@ export default function OnlineGate() {
   if (online.roomHome) {
     return (
       <main className="online-screen room-home-screen">
-        <section className="room-home-card">
+        <section className="room-home-card room-browser">
           <header className="room-home-header">
             <span className="access-kicker">Monopoly Online</span>
-            <h1>Выберите комнату</h1>
-            <p>Создайте новую игру или войдите к друзьям по шестизначному коду.</p>
+            <h1>Игровые комнаты</h1>
+            <p>Создайте свою комнату или присоединитесь к уже открытой партии.</p>
           </header>
 
-          <div className="room-mode-tabs" role="tablist" aria-label="Действие с комнатой">
-            <button
-              type="button"
-              className={roomMode === 'create' ? 'active' : ''}
-              onClick={() => setRoomMode('create')}
-            >
-              Создать комнату
-            </button>
-            <button
-              type="button"
-              className={roomMode === 'join' ? 'active' : ''}
-              onClick={() => setRoomMode('join')}
-            >
-              Войти по коду
-            </button>
+          <div className="room-browser-layout">
+            <aside className="room-create-panel">
+              <div className="room-mode-tabs" role="tablist" aria-label="Действие с комнатой">
+                <button
+                  type="button"
+                  className={roomMode === 'create' ? 'active' : ''}
+                  onClick={() => setRoomMode('create')}
+                >
+                  Создать
+                </button>
+                <button
+                  type="button"
+                  className={roomMode === 'join' ? 'active' : ''}
+                  onClick={() => setRoomMode('join')}
+                >
+                  По коду
+                </button>
+              </div>
+
+              <form className="room-form" onSubmit={submitRoom}>
+                {roomMode === 'create' ? (
+                  <>
+                    <label>
+                      Название комнаты
+                      <input
+                        autoFocus
+                        value={roomName}
+                        maxLength={40}
+                        onChange={(event) => setRoomName(event.target.value)}
+                        placeholder="Например, Вечерняя партия"
+                      />
+                    </label>
+                    <fieldset className="room-visibility">
+                      <legend>Доступ</legend>
+                      <label>
+                        <input
+                          type="radio"
+                          checked={roomVisibility === 'private'}
+                          onChange={() => setRoomVisibility('private')}
+                        />
+                        <span><strong>Закрытая</strong><small>Код и пароль</small></span>
+                      </label>
+                      <label>
+                        <input
+                          type="radio"
+                          checked={roomVisibility === 'public'}
+                          onChange={() => setRoomVisibility('public')}
+                        />
+                        <span><strong>Публичная</strong><small>Видна всем</small></span>
+                      </label>
+                    </fieldset>
+                  </>
+                ) : (
+                  <label>
+                    Код комнаты
+                    <input
+                      autoFocus
+                      className="room-code-input"
+                      value={roomCode}
+                      maxLength={6}
+                      onChange={(event) => setRoomCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+                      placeholder="ABC234"
+                      autoComplete="off"
+                    />
+                  </label>
+                )}
+
+                {(roomMode === 'join' || roomVisibility === 'private') ? (
+                  <label>
+                    Пароль {roomMode === 'join' ? <small>если установлен</small> : null}
+                    <input
+                      type="password"
+                      required={roomMode === 'create' && roomVisibility === 'private'}
+                      value={roomPassword}
+                      onChange={(event) => setRoomPassword(event.target.value)}
+                      placeholder={roomMode === 'join' ? 'Можно оставить пустым' : 'Придумайте пароль'}
+                      autoComplete="off"
+                    />
+                  </label>
+                ) : null}
+
+                {online.error ? <span className="online-error" role="alert">{online.error}</span> : null}
+                <button type="submit" disabled={roomMode === 'join' && roomCode.length !== 6}>
+                  {roomMode === 'create' ? 'Создать комнату' : 'Подключиться'}
+                </button>
+              </form>
+            </aside>
+
+            <section className="room-directory">
+              <header>
+                <div>
+                  <span className="access-kicker">Список серверов</span>
+                  <h2>Открытые комнаты</h2>
+                </div>
+                <span className="room-count">{online.rooms.length}</span>
+              </header>
+
+              {online.rooms.length > 0 ? (
+                <div className="room-list">
+                  {online.rooms.map((room) => {
+                    const unavailable = room.status === 'playing' || room.playerCount >= room.capacity
+                    return (
+                      <article className="room-list-item" key={room.id}>
+                        <div className="room-list-main">
+                          <span className={`room-status-dot ${room.status}`} aria-hidden="true" />
+                          <div>
+                            <strong>{room.name}</strong>
+                            <small>Код {room.code}</small>
+                          </div>
+                        </div>
+                        <span className="room-player-count">{room.playerCount}/{room.capacity}</span>
+                        <button
+                          type="button"
+                          disabled={unavailable}
+                          onClick={() => online.joinRoom(room.code, '')}
+                        >
+                          {room.status === 'playing' ? 'Игра идёт' : room.playerCount >= room.capacity ? 'Заполнена' : 'Войти'}
+                        </button>
+                      </article>
+                    )
+                  })}
+                </div>
+              ) : (
+                <div className="room-list-empty">
+                  <span>🎲</span>
+                  <strong>Открытых комнат пока нет</strong>
+                  <p>Создайте публичную комнату — она сразу появится здесь у остальных игроков.</p>
+                </div>
+              )}
+            </section>
           </div>
-
-          <form className="room-form" onSubmit={submitRoom}>
-            {roomMode === 'create' ? (
-              <>
-                <label>
-                  Название комнаты
-                  <input
-                    autoFocus
-                    value={roomName}
-                    maxLength={40}
-                    onChange={(event) => setRoomName(event.target.value)}
-                    placeholder="Например, Вечерняя партия"
-                  />
-                </label>
-                <fieldset className="room-visibility">
-                  <legend>Доступ</legend>
-                  <label>
-                    <input
-                      type="radio"
-                      checked={roomVisibility === 'private'}
-                      onChange={() => setRoomVisibility('private')}
-                    />
-                    <span><strong>Закрытая</strong><small>Вход по коду и паролю</small></span>
-                  </label>
-                  <label>
-                    <input
-                      type="radio"
-                      checked={roomVisibility === 'public'}
-                      onChange={() => setRoomVisibility('public')}
-                    />
-                    <span><strong>Публичная</strong><small>Вход по коду без пароля</small></span>
-                  </label>
-                </fieldset>
-              </>
-            ) : (
-              <label>
-                Код комнаты
-                <input
-                  autoFocus
-                  value={roomCode}
-                  maxLength={6}
-                  onChange={(event) => setRoomCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
-                  placeholder="ABC234"
-                  autoComplete="off"
-                />
-              </label>
-            )}
-
-            {(roomMode === 'join' || roomVisibility === 'private') ? (
-              <label>
-                Пароль комнаты {roomMode === 'join' ? <small>если установлен</small> : null}
-                <input
-                  type="password"
-                  required={roomMode === 'create' && roomVisibility === 'private'}
-                  value={roomPassword}
-                  onChange={(event) => setRoomPassword(event.target.value)}
-                  placeholder={roomMode === 'join' ? 'Можно оставить пустым' : 'Придумайте пароль'}
-                  autoComplete="off"
-                />
-              </label>
-            ) : null}
-
-            {online.error ? <span className="online-error" role="alert">{online.error}</span> : null}
-            <button type="submit" disabled={roomMode === 'join' && roomCode.length !== 6}>
-              {roomMode === 'create' ? 'Создать комнату' : 'Подключиться'}
-            </button>
-          </form>
         </section>
         <VersionStatus serverVersion={serverVersion} />
       </main>
