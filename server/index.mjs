@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { WebSocket, WebSocketServer } from 'ws'
 import { createAuditLog } from './audit-log.mjs'
-import { installRoomSchema } from './room-store.mjs'
+import { createRoomStore, installRoomSchema } from './room-store.mjs'
 import {
   validateAuctionTransition,
   validateCasinoTransition,
@@ -84,6 +84,7 @@ try { database.exec('ALTER TABLE games ADD COLUMN turn_key TEXT') } catch {}
 try { database.exec('ALTER TABLE games ADD COLUMN turn_deadline INTEGER') } catch {}
 try { database.exec("ALTER TABLE landings ADD COLUMN tile_name TEXT NOT NULL DEFAULT ''") } catch {}
 installRoomSchema(database)
+const roomStore = createRoomStore(database)
 database.prepare('UPDATE sessions SET connected = 0').run()
 
 const port = Number(process.env.PORT ?? 3001)
@@ -107,6 +108,8 @@ const idempotentMessageTypes = new Set([
   'leave_seat',
   'set_nickname',
   'set_ready',
+  'create_room',
+  'join_room',
   'turn_action_started',
   'game_event',
   'chat_message',
@@ -201,8 +204,71 @@ const lobbyState = () => {
 const broadcastLobby = () => {
   const lobby = lobbyState()
   for (const [socket, token] of clients) {
+    if (roomStore.getMembership(token)) continue
     const session = database.prepare('SELECT nickname, seat, ready FROM sessions WHERE token = ?').get(token)
     send(socket, { type: 'lobby', lobby, session: session ? { ...session, playerId: publicPlayerId(token) } : null })
+  }
+}
+
+const multiplayerLobbyState = (roomId) => {
+  const room = roomStore.getRoom(roomId)
+  if (!room) return null
+  const members = roomStore.listMembers(roomId)
+  const sessions = new Map(members.map((member) => {
+    const session = database.prepare(`
+      SELECT nickname, connected, last_seen FROM sessions WHERE token = ?
+    `).get(member.session_token)
+    return [member.session_token, session]
+  }))
+  const occupied = new Map(members.map((member) => [member.seat, member]))
+  return {
+    id: room.id,
+    code: room.code,
+    name: room.name,
+    visibility: room.visibility,
+    status: room.status,
+    gameId: room.game_id ?? null,
+    leaderPlayerId: publicPlayerId(room.leader_token),
+    countdownEndsAt: null,
+    seats: Array.from({ length: 5 }, (_, seat) => {
+      const member = occupied.get(seat)
+      const session = member ? sessions.get(member.session_token) : null
+      return member && session
+        ? {
+            seat,
+            playerId: publicPlayerId(member.session_token),
+            nickname: session.nickname,
+            ready: Boolean(member.ready),
+            connected: Boolean(session.connected),
+            disconnectedExpiresAt: session.connected ? null : session.last_seen + lobbyDisconnectDuration,
+            idleExpiresAt: session.connected ? member.last_active_at + lobbyIdleDuration : null,
+          }
+        : { seat, nickname: null, ready: false, connected: false, disconnectedExpiresAt: null, idleExpiresAt: null }
+    }),
+  }
+}
+
+const sendMultiplayerLobby = (socket, token, roomId) => {
+  const lobby = multiplayerLobbyState(roomId)
+  const member = roomStore.getMembership(token)
+  const session = database.prepare('SELECT nickname FROM sessions WHERE token = ?').get(token)
+  if (!lobby || !member || member.room_id !== roomId || !session) return
+  send(socket, {
+    type: 'lobby',
+    lobby,
+    session: {
+      nickname: session.nickname,
+      seat: member.seat,
+      ready: member.ready,
+      playerId: publicPlayerId(token),
+      isLeader: lobby.leaderPlayerId === publicPlayerId(token),
+    },
+  })
+}
+
+const broadcastMultiplayerLobby = (roomId) => {
+  for (const [socket, token] of clients) {
+    if (roomStore.getMembership(token)?.room_id === roomId) sendMultiplayerLobby(socket, token, roomId)
   }
 }
 
@@ -537,13 +603,67 @@ const authenticate = (socket, payload) => {
   clients.set(socket, token)
   clientPresence.set(socket, { visible: false, updatedAt: now })
   send(socket, { type: 'auth_ok', token })
-  broadcastLobby()
-  const room = roomRow()
-  if (room.status === 'playing' && room.game_id) sendStoredGameState(socket, room.game_id)
+  const membership = roomStore.getMembership(token)
+  if (membership) {
+    broadcastMultiplayerLobby(membership.room_id)
+    const multiplayerRoom = roomStore.getRoom(membership.room_id)
+    if (multiplayerRoom?.status === 'playing' && multiplayerRoom.game_id) {
+      sendStoredGameState(socket, multiplayerRoom.game_id)
+    }
+  } else {
+    broadcastLobby()
+    send(socket, { type: 'room_home' })
+    const room = roomRow()
+    if (room.status === 'playing' && room.game_id) sendStoredGameState(socket, room.game_id)
+  }
+  return true
+}
+
+const roomActionMessages = {
+  already_in_room: 'Сначала выйдите из текущей комнаты',
+  invalid_room_password: 'Неверный пароль комнаты',
+  invalid_session: 'Сессия игрока недействительна',
+  invalid_visibility: 'Некорректный тип комнаты',
+  room_already_playing: 'Игра в этой комнате уже началась',
+  room_code_unavailable: 'Не удалось создать код комнаты. Попробуйте ещё раз',
+  room_full: 'В комнате уже пять игроков',
+  room_not_found: 'Комната с таким кодом не найдена',
+}
+
+const handleRoomDirectoryMessage = (socket, token, message) => {
+  if (message.type !== 'create_room' && message.type !== 'join_room') return false
+  try {
+    const room = message.type === 'create_room'
+      ? roomStore.createRoom({
+          leaderToken: token,
+          name: message.name,
+          visibility: message.visibility,
+          password: message.password,
+        })
+      : roomStore.findRoomByCode(message.code)
+    const membership = message.type === 'create_room'
+      ? roomStore.getMembership(token)
+      : roomStore.joinRoom({ sessionToken: token, code: message.code, password: message.password })
+    const roomId = membership?.room_id ?? room?.id
+    if (!roomId) throw new Error('room_not_found')
+    auditLog.write(message.type === 'create_room' ? 'room_created' : 'room_joined', {
+      roomId,
+      playerId: publicPlayerId(token),
+    })
+    broadcastMultiplayerLobby(roomId)
+  } catch (error) {
+    send(socket, {
+      type: 'action_error',
+      message: roomActionMessages[error?.message] ?? 'Не удалось выполнить действие с комнатой',
+      code: error?.message ?? 'room_action_failed',
+    })
+  }
   return true
 }
 
 const handleLobbyMessage = (socket, token, message) => {
+  if (handleRoomDirectoryMessage(socket, token, message)) return
+  if (roomStore.getMembership(token)) return
   const room = roomRow()
   const session = database.prepare('SELECT * FROM sessions WHERE token = ?').get(token)
   if (!session) return
@@ -1078,13 +1198,25 @@ webSocketServer.on('connection', (socket, request) => {
     clients.delete(socket)
     clientPresence.delete(socket)
     if (token && ![...clients.values()].includes(token)) {
-      const room = roomRow()
-      database.prepare(`
-        UPDATE sessions SET connected = 0, ready = CASE WHEN ? = 'lobby' THEN 0 ELSE ready END, last_seen = ?
-        WHERE token = ?
-      `).run(room.status, Date.now(), token)
-      if (room.status === 'lobby') reconcileCountdown()
-      broadcastLobby()
+      const membership = roomStore.getMembership(token)
+      if (membership) {
+        const multiplayerRoom = roomStore.getRoom(membership.room_id)
+        database.prepare('UPDATE sessions SET connected = 0, last_seen = ? WHERE token = ?')
+          .run(Date.now(), token)
+        if (multiplayerRoom?.status === 'lobby') {
+          database.prepare('UPDATE room_members SET ready = 0, last_active_at = ? WHERE session_token = ?')
+            .run(Date.now(), token)
+        }
+        broadcastMultiplayerLobby(membership.room_id)
+      } else {
+        const room = roomRow()
+        database.prepare(`
+          UPDATE sessions SET connected = 0, ready = CASE WHEN ? = 'lobby' THEN 0 ELSE ready END, last_seen = ?
+          WHERE token = ?
+        `).run(room.status, Date.now(), token)
+        if (room.status === 'lobby') reconcileCountdown()
+        broadcastLobby()
+      }
     }
   })
 })
