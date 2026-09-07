@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { WebSocket, WebSocketServer } from 'ws'
 import { createAuditLog } from './audit-log.mjs'
+import { installRoomSchema } from './room-store.mjs'
 import {
   validateAuctionTransition,
   validateCasinoTransition,
@@ -82,6 +83,7 @@ database.exec(`
 try { database.exec('ALTER TABLE games ADD COLUMN turn_key TEXT') } catch {}
 try { database.exec('ALTER TABLE games ADD COLUMN turn_deadline INTEGER') } catch {}
 try { database.exec("ALTER TABLE landings ADD COLUMN tile_name TEXT NOT NULL DEFAULT ''") } catch {}
+installRoomSchema(database)
 database.prepare('UPDATE sessions SET connected = 0').run()
 
 const port = Number(process.env.PORT ?? 3001)
