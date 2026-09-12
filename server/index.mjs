@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync, readFileSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { extname, join, normalize } from 'node:path'
+import { extname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { WebSocket, WebSocketServer } from 'ws'
 import { createAuditLog } from './audit-log.mjs'
 import { createRoomStore, installRoomSchema } from './room-store.mjs'
+import { preservePendingBookBonuses } from '../shared/book-bonus.mjs'
 import {
   validateAuctionTransition,
   validateCasinoTransition,
@@ -458,18 +459,10 @@ const settleBalancesForElimination = (previous, next, newlyEliminatedIds) => {
 
 const preservePendingServerRewards = (previous, next) => {
   if (!previous) return
-  const pendingBookBonusKeys = new Set(previous.serverEconomy?.pendingBookBonusKeys ?? [])
-  for (const player of previous.players) {
-    const previousLap = previous.lapCounts?.[player.id] ?? 0
-    const nextLap = next.lapCounts?.[player.id] ?? 0
-    if (
-      previous.playerEffects?.[player.id]?.bookChallenge &&
-      !next.playerEffects?.[player.id]?.bookChallenge && nextLap > previousLap
-    ) pendingBookBonusKeys.add(`start:${player.id}:${nextLap}`)
-  }
   next.serverEconomy = {
     ...next.serverEconomy,
-    pendingBookBonusKeys: [...pendingBookBonusKeys].slice(-50),
+    pendingBookBonusAmounts: preservePendingBookBonuses(previous, next),
+    pendingBookBonusKeys: [],
   }
 }
 
@@ -1256,9 +1249,22 @@ const server = createServer(async (request, response) => {
     return
   }
 
-  const requestPath = request.url === '/' ? '/index.html' : String(request.url).split('?')[0]
-  const safePath = normalize(requestPath).replace(/^(\.\.(\/|\\|$))+/, '')
-  let filePath = join(distDirectory, safePath)
+  let requestPath
+  try {
+    requestPath = decodeURIComponent(String(request.url).split('?')[0])
+    if (requestPath.includes('\0')) throw new Error('Invalid path')
+  } catch {
+    response.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' })
+    response.end('Некорректный путь запроса')
+    return
+  }
+  let filePath = resolve(distDirectory, `.${requestPath}`)
+  const relativePath = relative(distDirectory, filePath)
+  if (relativePath === '..' || relativePath.startsWith('../') || relativePath.startsWith('..\\') || isAbsolute(relativePath)) {
+    response.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+    response.end('Доступ запрещён')
+    return
+  }
 
   try {
     if (!statSync(filePath).isFile()) filePath = join(distDirectory, 'index.html')
@@ -1434,6 +1440,9 @@ const processTurnTimeout = (room) => {
 
   const [handlerSocket, handlerToken] = handler
   const handlerId = publicPlayerId(handlerToken)
+  // A client remembers completed timeout IDs. A renewed lease must be a new
+  // attempt, including when all handlers were tried and we return to the first.
+  controller.timeoutId = randomUUID()
   controller.claimedBy = handlerId
   controller.claimExpiresAt = now + 10000
   controller.lastSentAt = now

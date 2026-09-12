@@ -9,6 +9,7 @@ import { eventImages, groupColors, groupLabels, initialPlayers as defaultPlayers
 import { randomIntInclusive, rollComplexDice } from './random/randomEngine'
 import type { DiceRoll, LogEntry, Player, Tile, TradeLogDetails } from './types'
 import type { OnlineGameEvent } from './online/types'
+import { bookChallengeCount, bookBonusAmount } from '../shared/book-bonus.mjs'
 
 const casinoBet = 1000
 const initialCasinoJackpot = 2000
@@ -76,7 +77,7 @@ type PlayerEffects = {
   freeJailRelease?: boolean
   reverseNextRoll?: boolean
   skipTurns?: number
-  bookChallenge?: boolean
+  bookChallenge?: boolean | number
 }
 
 type EventPayment = {
@@ -523,7 +524,7 @@ function App({
   const canLocalPlayerPay = !localPlayerId || localPlayerId === pendingPayment?.payerId
   const canActNow = () => canLocalPlayerAct || serverForcedActionRef.current
   const secondsLeft = turnDeadline && turnClockNow
-    ? Math.min(70, Math.max(0, Math.ceil((turnDeadline - turnClockNow) / 1000)))
+    ? Math.max(0, Math.ceil((turnDeadline - turnClockNow) / 1000))
     : 70
 
   useEffect(() => {
@@ -1996,8 +1997,9 @@ function App({
       return charge(amount, `${player.name} закупается в интернете на ${money(amount)}`)
     }
     if (event === 'book-challenge') {
-      updatePlayerEffect(player.id, { bookChallenge: true })
-      setLogs((items) => [...items, createLog(`${player.name} получит ${money(500)}, если дойдёт до старта, не потратив денег`, player.id, 'chance')])
+      const challenges = bookChallengeCount(playerEffects[player.id]?.bookChallenge) + 1
+      updatePlayerEffect(player.id, { bookChallenge: challenges })
+      setLogs((items) => [...items, createLog(`${player.name} получит ${money(bookBonusAmount(challenges))}, если дойдёт до старта, не потратив денег${challenges > 1 ? ` (книжных бонусов: ${challenges})` : ''}`, player.id, 'chance')])
       completeTurn(extraRoll)
       return
     }
@@ -2399,7 +2401,7 @@ function App({
     const completedLaps = lapCounts[player.id] ?? 0
     const completedLapNumber = completedLaps + 1
     const regularStartBonus = passedStart ? startBonusForLap(completedLapNumber) : 0
-    const bookBonus = passedStart && playerEffects[player.id]?.bookChallenge ? 500 : 0
+    const bookBonus = passedStart ? bookBonusAmount(playerEffects[player.id]?.bookChallenge) : 0
     const totalStartBonus = regularStartBonus + bookBonus
     const landedTile = tiles[nextPosition]
     const rolledDouble = roll.dice[0] === roll.dice[1]
@@ -2652,12 +2654,15 @@ function App({
 
   useEffect(() => {
     if (!turnTimeoutSignal || handledTimeoutIdsRef.current.has(turnTimeoutSignal.timeoutId)) return
-    handledTimeoutIdsRef.current.add(turnTimeoutSignal.timeoutId)
-    if (handledTimeoutIdsRef.current.size > 100) {
-      const oldestTimeoutId = handledTimeoutIdsRef.current.values().next().value
-      if (oldestTimeoutId) handledTimeoutIdsRef.current.delete(oldestTimeoutId)
-    }
     const timer = window.setTimeout(() => {
+      // Cleanup may cancel this scheduled callback (including in StrictMode).
+      // Only consume the signal once its handler actually starts.
+      if (handledTimeoutIdsRef.current.has(turnTimeoutSignal.timeoutId)) return
+      handledTimeoutIdsRef.current.add(turnTimeoutSignal.timeoutId)
+      if (handledTimeoutIdsRef.current.size > 100) {
+        const oldestTimeoutId = handledTimeoutIdsRef.current.values().next().value
+        if (oldestTimeoutId) handledTimeoutIdsRef.current.delete(oldestTimeoutId)
+      }
       const handleTimeout = async () => {
         serverForcedActionRef.current = true
         suspendOnlinePublishRef.current = true
@@ -2816,7 +2821,7 @@ function App({
                   <strong>{player.name}</strong>
                   <span className="player-state">
                     <i />
-                    {isEliminated ? 'Проиграл' : isDisconnected ? 'Не в сети' : jailedPlayerIds.includes(player.id) ? 'В тюрьме' : isActive ? 'Ходит' : 'Ждет'}
+                    {isEliminated ? 'Проиграл' : isDisconnected ? 'Не в сети' : isDecisionPlayer && !isActive ? 'Принимает решение' : jailedPlayerIds.includes(player.id) ? 'В тюрьме' : isActive ? 'Ходит' : 'Ждет'}
                   </span>
                   <span className="player-money">{money(player.money)}</span>
                   <span className={`player-delta ${delta > 0 ? 'positive' : ''} ${delta < 0 ? 'negative' : ''}`}>
@@ -2836,7 +2841,11 @@ function App({
                       {playerEffects[player.id]?.freeJailRelease ? <i>Адвокат</i> : null}
                       {playerEffects[player.id]?.reverseNextRoll ? <i>Ход назад</i> : null}
                       {playerEffects[player.id]?.skipTurns ? <i>Пропуск хода</i> : null}
-                      {playerEffects[player.id]?.bookChallenge ? <i>Книжный бонус</i> : null}
+                      {playerEffects[player.id]?.bookChallenge ? (
+                        <i title={`Получите ${money(bookBonusAmount(playerEffects[player.id]?.bookChallenge))} при следующем прохождении старта без трат. Повторные выпадения складываются; трата денег отменяет все накопленные книжные бонусы.`}>
+                          Книжный бонус {money(bookBonusAmount(playerEffects[player.id]?.bookChallenge))}
+                        </i>
+                      ) : null}
                     </span>
                   ) : null}
                 </div>
@@ -3747,7 +3756,7 @@ function App({
               style={{ '--player-color': decisionPlayer.color } as CSSProperties}
               aria-live="polite"
             >
-              <small>Сейчас ходит</small>
+              <small>{decisionPlayer.id === activePlayer.id ? 'Сейчас ходит' : 'Принимает решение'}</small>
               <strong>{decisionPlayer.name}</strong>
             </div>
           )}

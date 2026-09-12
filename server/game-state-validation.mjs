@@ -1,3 +1,5 @@
+import { BOOK_BONUS_AMOUNT, bookBonusAmount } from '../shared/book-bonus.mjs'
+
 const BOARD_SIZE = 40
 const MAX_PROPERTY_LEVEL = 5
 const PROPERTY_PRICES = new Map([
@@ -606,9 +608,10 @@ export const validateMoneyTransition = (previous, next, senderId, movementAuthor
     const rewardKeys = new Set(previous.serverEconomy?.rewardKeys ?? [])
     const startRewardKey = `start:${actorId}:${lapNumber}`
     const pendingBookBonusKeys = new Set(previous.serverEconomy?.pendingBookBonusKeys ?? [])
-    const bookBonus = previous.playerEffects?.[actorId]?.bookChallenge || pendingBookBonusKeys.has(startRewardKey)
-      ? 500
-      : 0
+    const pendingBookBonusAmounts = { ...(previous.serverEconomy?.pendingBookBonusAmounts ?? {}) }
+    const bookBonus = bookBonusAmount(previous.playerEffects?.[actorId]?.bookChallenge)
+      || pendingBookBonusAmounts[startRewardKey]
+      || (pendingBookBonusKeys.has(startRewardKey) ? BOOK_BONUS_AMOUNT : 0)
     const startReward = startBonusForLap(lapNumber) + bookBonus
     if (
       movementAuthorization?.playerId === actorId && movementAuthorization.passedStart &&
@@ -617,10 +620,14 @@ export const validateMoneyTransition = (previous, next, senderId, movementAuthor
       actorDelta === startReward && !rewardKeys.has(startRewardKey)
     ) {
       pendingBookBonusKeys.delete(startRewardKey)
+      // The client can clear the effect before its animated money update arrives.
+      const nextPendingAmounts = { ...(next.serverEconomy?.pendingBookBonusAmounts ?? pendingBookBonusAmounts) }
+      delete nextPendingAmounts[startRewardKey]
       next.serverEconomy = {
         ...next.serverEconomy,
         rewardKeys: [...rewardKeys, startRewardKey].slice(-200),
         pendingBookBonusKeys: [...pendingBookBonusKeys],
+        pendingBookBonusAmounts: nextPendingAmounts,
       }
       return null
     }

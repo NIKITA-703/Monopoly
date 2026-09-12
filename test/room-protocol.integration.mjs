@@ -11,7 +11,7 @@ const port = 3600 + Math.floor(Math.random() * 400)
 const dataDirectory = mkdtempSync(join(tmpdir(), 'monopoly-rooms-'))
 const server = spawn(process.execPath, ['server/index.mjs'], {
   cwd: process.cwd(),
-  env: { ...process.env, PORT: String(port), DATA_DIR: dataDirectory },
+  env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), DATA_DIR: dataDirectory, TURN_SECONDS: '5' },
   stdio: ['ignore', 'pipe', 'inherit'],
 })
 
@@ -199,6 +199,29 @@ try {
     !queues.get(reconnected.socket).some((message) => message.type === 'game_state' && message.gameId === startedLobby.lobby.gameId),
     'Состояние игры не должно отправляться участникам другой комнаты',
   )
+
+  // Only one connected client remains in this game. If it fails to complete
+  // an auto-turn, the next lease must work even for that same client.
+  spectator.socket.close()
+  await once(spectator.socket, 'close')
+  const firstTimeout = await waitFor(third.socket, (message) =>
+    message.type === 'turn_timeout_granted' && message.gameId === startedLobby.lobby.gameId, 7000)
+  const retryTimeout = await waitFor(third.socket, (message) =>
+    message.type === 'turn_timeout_granted' && message.gameId === startedLobby.lobby.gameId, 12000)
+  assert.notEqual(retryTimeout.timeoutId, firstTimeout.timeoutId, 'A retry needs a fresh ID so the client does not ignore it')
+  send(third, {
+    type: 'game_snapshot', timeoutId: firstTimeout.timeoutId,
+    state: { ...publicGameState.state, turnSequence: 99 },
+  })
+  send(third, {
+    type: 'game_snapshot', timeoutId: retryTimeout.timeoutId,
+    state: { ...publicGameState.state, turnSequence: publicGameState.state.turnSequence + 1 },
+  })
+  const resumed = await waitFor(third.socket, (message) =>
+    message.type === 'game_state' && message.state.turnSequence === publicGameState.state.turnSequence + 1)
+  assert.ok(resumed.turnDeadline > Date.now(), 'A completed auto-turn starts a new timer')
+  assert.ok(!queues.get(third.socket).some((message) => message.type === 'game_state' && message.state.turnSequence === 99),
+    'Expired timeout leases must not change the game')
 
   first.socket.close()
   reconnected.socket.close()
