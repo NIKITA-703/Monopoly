@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -63,7 +64,7 @@ const waitFor = (socket, predicate, timeout = 8000) => {
     setTimeout(() => {
       const index = listeners.get(socket).indexOf(listener)
       if (index >= 0) listeners.get(socket).splice(index, 1)
-      reject(new Error('Истекло время ожидания сообщения'))
+      reject(new Error(`Истекло время ожидания сообщения: ${predicate.toString()}`))
     }, timeout)
   })
 }
@@ -387,6 +388,10 @@ try {
   })
   const auctionSnapshot = await waitFor(second.socket, (message) =>
     message.type === 'game_state' && message.state.auction?.activeBidderId === ids[1])
+  const auctionObserverSnapshot = await waitFor(first.socket, (message) =>
+    message.type === 'game_state' && message.revision === auctionSnapshot.revision)
+  assert.equal(auctionSnapshot.turnDeadline, auctionObserverSnapshot.turnDeadline, 'All participants receive the same auction deadline')
+  assert.ok(Number.isFinite(auctionSnapshot.serverTime), 'Clients need server time to avoid OS clock skew')
   assert.ok(auctionSnapshot.turnDeadline - Date.now() > 1000, 'Аукционный таймер должен учитывать AUCTION_SECONDS')
   assert.ok(auctionSnapshot.turnDeadline - Date.now() <= 2200, 'Аукционный таймер не должен использовать время обычного хода')
   send(second, {
@@ -399,6 +404,10 @@ try {
   })
   await waitFor(second.socket, (message) =>
     message.type === 'action_error' && message.message.includes('денежную операцию'))
+  const correctedAuction = await waitFor(second.socket, (message) =>
+    message.type === 'game_state' && message.resyncId && message.state.auction?.tileId === 1)
+  assert.equal(correctedAuction.revision, auctionSnapshot.revision, 'Rejected optimistic actions are corrected even without a new revision')
+  assert.equal(correctedAuction.turnDeadline, auctionSnapshot.turnDeadline, 'Rejected bids do not extend the timer')
   send(first, { type: 'client_presence', visible: false })
   send(second, { type: 'client_presence', visible: true })
   const auctionTimeout = await waitFor(second.socket, (message) =>
@@ -408,8 +417,31 @@ try {
     ids[1],
     'Сервер должен поручить таймаут активной вкладке, даже когда ходит другой игрок',
   )
-  send(second, { type: 'game_snapshot', timeoutId: auctionTimeout.timeoutId, state: redeemedSnapshot.state })
-  await waitFor(second.socket, (message) => message.type === 'game_state' && message.state.auction === null)
+  send(second, {
+    type: 'game_snapshot', timeoutId: auctionTimeout.timeoutId,
+    state: { ...auctionSnapshot.state, auction: { ...auctionSnapshot.state.auction, passedIds: [ids[1]], activeBidderId: ids[2] } },
+  })
+  let passingAuction = await waitFor(third.socket, (message) =>
+    message.type === 'game_state' && message.state.auction?.activeBidderId === ids[2])
+  assert.ok(passingAuction.turnDeadline > auctionSnapshot.turnDeadline, 'The next bidder gets a fresh deadline')
+  assert.deepEqual(passingAuction.state.missedTurnCounts, auctionSnapshot.state.missedTurnCounts, 'Auction timeout does not count as a missed normal turn')
+  for (let index = 2; index < ids.length; index += 1) {
+    const client = [first, second, third, fourth, fifth].find((candidate) =>
+      createHash('sha256').update(candidate.token).digest('hex').slice(0, 16) === ids[index])
+    assert.ok(client, 'Every auction bidder must have a connected test client')
+    const nextAuction = index === ids.length - 1 ? null : {
+      ...passingAuction.state.auction,
+      passedIds: [...passingAuction.state.auction.passedIds, ids[index]],
+      activeBidderId: ids[index + 1],
+    }
+    send(client, {
+      type: 'game_snapshot',
+      state: nextAuction ? { ...passingAuction.state, auction: nextAuction } : redeemedSnapshot.state,
+    })
+    passingAuction = await waitFor(second.socket, (message) =>
+      message.type === 'game_state' && message.revision > passingAuction.revision &&
+      (nextAuction ? message.state.auction?.activeBidderId === ids[index + 1] : message.state.auction === null))
+  }
   send(first, { type: 'client_presence', visible: true })
   send(second, { type: 'client_presence', visible: false })
   send(first, { type: 'game_event', event: { kind: 'dice-roll', playerId: ids[0], dice: [1, 2] } })

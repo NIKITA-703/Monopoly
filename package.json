@@ -14,6 +14,7 @@
     "test:online": "node test/online.integration.mjs",
     "test:static": "npm run build && node test/static-files.integration.mjs",
     "test:effects": "node --test test/book-bonus.test.mjs",
+    "test:auction": "node --test test/auction-clock.test.mjs",
     "preview": "vite preview",
     "start": "node --env-file-if-exists=.env server/index.mjs"
   },

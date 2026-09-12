@@ -42,13 +42,14 @@ export type OnlineGameEvent =
   | { kind: 'movement'; playerId: string; startPosition: number; steps: number; direction: 1 | -1 }
   | { kind: 'direct-movement'; playerId: string; startPosition: number; destinationPosition: number; speedMultiplier: number }
 
-export type ServerMessage =
+export type ServerMessage = { serverTime?: number } & (
   | { type: 'auth_ok'; token: string }
   | { type: 'auth_error'; message: string }
   | { type: 'action_error'; message: string; code?: string }
   | { type: 'room_home'; rooms: RoomSummary[] }
   | { type: 'lobby'; lobby: LobbyState; session: OnlineSession }
-  | { type: 'game_state'; gameId: string; revision: number; turnDeadline: number | null; senderId?: string | null; state: unknown }
+  | { type: 'game_state'; gameId: string; revision: number; turnDeadline: number | null; senderId?: string | null; resyncId?: string; state: unknown }
   | { type: 'turn_deadline'; gameId: string; turnDeadline: number | null }
   | { type: 'turn_timeout_granted'; gameId: string; turnKey: string; timeoutId: string; actorId: string | null }
   | { type: 'game_event'; gameId: string; eventId: string; senderId: string; event: OnlineGameEvent }
+)

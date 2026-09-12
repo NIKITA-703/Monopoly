@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { LobbyState, OnlineGameEvent, OnlineSession, RoomSummary, ServerMessage } from './types'
 import { playGameSound } from '../audio/gameAudio'
+import { createServerClock } from '../../shared/server-clock.mjs'
 
 const sessionStorageKey = 'monopoly.online.session'
 const persistentSessionStorageKey = 'monopoly.online.player-session'
@@ -22,6 +23,7 @@ const inviteRoomCode = new URLSearchParams(window.location.search)
   .get('room')?.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) ?? ''
 
 export function useOnlineLobby() {
+  const [serverClock] = useState(() => createServerClock())
   const socketRef = useRef<WebSocket | null>(null)
   const reconnectTimerRef = useRef<number | null>(null)
   const playerIdRef = useRef<string | null>(null)
@@ -42,7 +44,7 @@ export function useOnlineLobby() {
   const [roomHome, setRoomHome] = useState(false)
   const [rooms, setRooms] = useState<RoomSummary[]>([])
   const [error, setError] = useState('')
-  const [gameState, setGameState] = useState<{ gameId: string; revision: number; state: unknown } | null>(null)
+  const [gameState, setGameState] = useState<{ gameId: string; revision: number; resyncId?: string; state: unknown } | null>(null)
   const [turnDeadline, setTurnDeadline] = useState<number | null>(null)
   const [turnTimeout, setTurnTimeout] = useState<{ timeoutId: string; actorId: string | null } | null>(null)
   const [gameEvents, setGameEvents] = useState<Array<{ nonce: string; senderId: string; event: OnlineGameEvent }>>([])
@@ -83,7 +85,6 @@ export function useOnlineLobby() {
       const deferredState = deferredGameStateRef.current
       deferredGameStateRef.current = null
       if (deferredState) {
-        setTurnDeadline(deferredState.turnDeadline)
         setGameState(deferredState)
       }
     }
@@ -127,6 +128,7 @@ export function useOnlineLobby() {
 
       socket.addEventListener('message', (event) => {
         const message = JSON.parse(String(event.data)) as ServerMessage
+        serverClock.sync(message.serverTime)
         if (message.type === 'auth_ok') {
           window.sessionStorage.setItem(sessionStorageKey, message.token)
           window.localStorage.setItem(persistentSessionStorageKey, message.token)
@@ -182,6 +184,9 @@ export function useOnlineLobby() {
           return
         }
         if (message.type === 'game_state') {
+          // The server timer keeps running while tokens animate. Do not defer
+          // its deadline or restore an older one when an animation completes.
+          setTurnDeadline(message.turnDeadline)
           const state = message.state as {
             turnSequence?: number
             activePlayerIndex?: number
@@ -249,7 +254,6 @@ export function useOnlineLobby() {
           // The author already has this optimistic state. Reapplying intermediate
           // echoes makes its dialogs and token briefly jump to an older frame.
           if (message.senderId && message.senderId === playerIdRef.current) {
-            setTurnDeadline(message.turnDeadline)
             return
           }
           // Movement and the following snapshots use the same ordered WebSocket
@@ -260,16 +264,15 @@ export function useOnlineLobby() {
               pendingGameEventIdsRef.current.clear()
               deferredGameStateRef.current = null
               setGameEvents([])
-              setTurnDeadline(message.turnDeadline)
               setGameState(message)
               return
             }
-            if (!deferredGameStateRef.current || message.revision > deferredGameStateRef.current.revision) {
+            if (!deferredGameStateRef.current || message.revision > deferredGameStateRef.current.revision ||
+              (message.resyncId && message.revision === deferredGameStateRef.current.revision)) {
               deferredGameStateRef.current = message
             }
             return
           }
-          setTurnDeadline(message.turnDeadline)
           setGameState(message)
           return
         }
@@ -325,7 +328,7 @@ export function useOnlineLobby() {
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current)
       socketRef.current?.close()
     }
-  }, [send])
+  }, [send, serverClock])
 
   const publishGameState = useCallback((state: unknown) => {
     const timeoutId = pendingTimeoutIdRef.current
@@ -340,7 +343,6 @@ export function useOnlineLobby() {
     const deferredState = deferredGameStateRef.current
     deferredGameStateRef.current = null
     if (deferredState) {
-      setTurnDeadline(deferredState.turnDeadline)
       setGameState(deferredState)
     }
   }, [])
@@ -352,6 +354,7 @@ export function useOnlineLobby() {
   }, [send])
 
   return {
+    getServerTime: serverClock.now,
     status,
     lobby,
     session,

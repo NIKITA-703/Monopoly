@@ -336,12 +336,13 @@ export default function OnlineGate() {
           localPlayerId={online.session.playerId}
           onlineState={
             online.gameState && online.gameState.gameId === online.lobby.gameId
-              ? { revision: online.gameState.revision, state: online.gameState.state as OnlineGameState }
+              ? { revision: online.gameState.revision, resyncId: online.gameState.resyncId, state: online.gameState.state as OnlineGameState }
               : null
           }
           publishOnlineState={online.publishGameState}
           beginOnlineTurnAction={online.beginTurnAction}
           turnDeadline={online.turnDeadline}
+          getServerTime={online.getServerTime}
           turnTimeoutSignal={online.turnTimeout}
           onReturnToLobby={online.returnToLobby}
           sendOnlineChat={online.sendChatMessage}

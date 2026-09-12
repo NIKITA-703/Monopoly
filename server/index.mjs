@@ -140,7 +140,7 @@ const mimeTypes = {
 }
 
 const send = (socket, message) => {
-  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ ...message, serverTime: Date.now() }))
 }
 
 const claimRequest = (token, message) => {
@@ -285,7 +285,7 @@ const broadcastRoomHome = () => {
   }
 }
 
-const sendStoredGameState = (socket, gameId) => {
+const sendStoredGameState = (socket, gameId, resync = false) => {
   const game = database.prepare('SELECT state_json, updated_at, turn_deadline FROM games WHERE id = ?').get(gameId)
   if (!game?.state_json) return
   send(socket, {
@@ -293,6 +293,7 @@ const sendStoredGameState = (socket, gameId) => {
     gameId,
     revision: game.updated_at,
     turnDeadline: game.turn_deadline,
+    ...(resync ? { resyncId: randomUUID() } : {}),
     state: JSON.parse(game.state_json),
   })
 }
@@ -1040,6 +1041,7 @@ const handleLobbyMessage = (socket, token, message) => {
         senderId,
         reason: submittedTimeoutId ? 'invalid_timeout_id' : 'decision_expired',
       })
+      sendStoredGameState(socket, room.game_id, true)
       return
     }
     if (!mayInitialize && !mayUpdate && !mayAnswerTrade && !mayHandleTimeout) {
@@ -1048,6 +1050,7 @@ const handleLobbyMessage = (socket, token, message) => {
         senderId,
         expectedActorId: previousActorId,
       })
+      sendStoredGameState(socket, room.game_id, true)
       return
     }
     const tradeResolutionError = storedState
@@ -1078,6 +1081,7 @@ const handleLobbyMessage = (socket, token, message) => {
         reason: economyTransitionError,
       })
       send(socket, { type: 'action_error', message: 'Сервер отклонил некорректную денежную операцию' })
+      sendStoredGameState(socket, room.game_id, true)
       return
     }
 

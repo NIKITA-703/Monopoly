@@ -399,10 +399,11 @@ const randomMoneyByTen = (minimum: number, maximum: number) =>
 type AppProps = {
   initialGamePlayers?: Player[]
   localPlayerId?: string
-  onlineState?: { revision: number; state: OnlineGameState } | null
+  onlineState?: { revision: number; resyncId?: string; state: OnlineGameState } | null
   publishOnlineState?: (state: OnlineGameState) => void
   beginOnlineTurnAction?: () => void
   turnDeadline?: number | null
+  getServerTime?: () => number
   turnTimeoutSignal?: { timeoutId: string; actorId: string | null } | null
   onReturnToLobby?: () => void
   sendOnlineChat?: (text: string) => void
@@ -419,6 +420,7 @@ function App({
   publishOnlineState,
   beginOnlineTurnAction,
   turnDeadline,
+  getServerTime,
   turnTimeoutSignal,
   onReturnToLobby,
   sendOnlineChat,
@@ -480,6 +482,7 @@ function App({
   const lastTradeSoundKeyRef = useRef<string | null>(null)
   const lastAuctionSoundKeyRef = useRef<string | null>(null)
   const appliedOnlineRevisionRef = useRef(0)
+  const appliedResyncIdRef = useRef<string | undefined>(undefined)
   const applyingOnlineStateRef = useRef(false)
   const serverForcedActionRef = useRef(false)
   const suspendOnlinePublishRef = useRef(false)
@@ -598,9 +601,9 @@ function App({
 
   useEffect(() => {
     if (!turnDeadline) return
-    const syncClock = () => setTurnClockNow(Date.now())
+    const syncClock = () => setTurnClockNow(getServerTime ? getServerTime() : Date.now())
     syncClock()
-    const timer = window.setInterval(() => setTurnClockNow(Date.now()), 250)
+    const timer = window.setInterval(syncClock, 250)
     window.addEventListener('focus', syncClock)
     document.addEventListener('visibilitychange', syncClock)
     return () => {
@@ -608,7 +611,7 @@ function App({
       window.removeEventListener('focus', syncClock)
       document.removeEventListener('visibilitychange', syncClock)
     }
-  }, [turnDeadline])
+  }, [turnDeadline, getServerTime])
 
   useEffect(() => {
     if (!winnerId || !onReturnToLobby) return
@@ -678,7 +681,10 @@ function App({
     : null
 
   useEffect(() => {
-    if (!onlineState || onlineState.revision <= appliedOnlineRevisionRef.current) return
+    if (!onlineState) return
+    const isCorrection = Boolean(onlineState.resyncId && onlineState.resyncId !== appliedResyncIdRef.current)
+    if (!isCorrection && onlineState.revision <= appliedOnlineRevisionRef.current) return
+    appliedResyncIdRef.current = onlineState.resyncId
     const state = onlineState.state
     applyingOnlineStateRef.current = true
     const incomingDecisionPlayerId = state.tradeDraft?.stage === 'review'

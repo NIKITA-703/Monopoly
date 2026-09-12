@@ -358,6 +358,26 @@ export const validateAuctionTransition = (previous, next) => {
       next.auction.passedIds.includes(bidderId)
     if (!placedBid && !passed) return 'invalid_auction_action'
     if (placedBid && isSoleAuctionDecision) return 'invalid_auction_action'
+    const expectedPassedIds = passed ? [...new Set([...auction.passedIds, bidderId])] : auction.passedIds
+    const expectedHighestBidder = placedBid ? bidderId : auction.highestBidderId
+    const bidder = previous.players.find((player) => player.id === bidderId)
+    if (
+      next.auction.tileId !== auction.tileId ||
+      JSON.stringify(next.auction.participantIds) !== JSON.stringify(auction.participantIds) ||
+      !sameIds(next.auction.passedIds, expectedPassedIds) ||
+      next.auction.highestBidderId !== expectedHighestBidder ||
+      !Number.isSafeInteger(next.auction.currentBid) ||
+      (placedBid && next.auction.currentBid > (bidder?.money ?? 0)) ||
+      next.activePlayerIndex !== previous.activePlayerIndex ||
+      next.turnSequence !== previous.turnSequence
+    ) return 'invalid_auction_action'
+    const candidates = auction.participantIds.filter((id) =>
+      !expectedPassedIds.includes(id) && id !== expectedHighestBidder && !eliminatedIds.has(id) &&
+      (previous.players.find((player) => player.id === id)?.money ?? 0) >= next.auction.currentBid + 100)
+    const currentIndex = auction.participantIds.indexOf(bidderId)
+    const orderedIds = [...auction.participantIds.slice(currentIndex + 1), ...auction.participantIds.slice(0, currentIndex + 1)]
+    const expectedNextBidder = orderedIds.find((id) => candidates.includes(id))
+    if (!expectedNextBidder || next.auction.activeBidderId !== expectedNextBidder) return 'invalid_auction_next_bidder'
     return null
   }
 
@@ -367,6 +387,10 @@ export const validateAuctionTransition = (previous, next) => {
   ])].filter((tileId) => previous.owners?.[tileId] !== next.owners?.[tileId])
   if (changedOwnerIds.length === 0) {
     if (playerMoneyChanged(previous, next)) return 'invalid_auction_balance'
+    const remainingCandidates = auction.participantIds.filter((id) =>
+      id !== auction.activeBidderId && !auction.passedIds.includes(id) && !eliminatedIds.has(id) &&
+      (previous.players.find((player) => player.id === id)?.money ?? 0) >= auction.currentBid + 100)
+    if (auction.highestBidderId != null || remainingCandidates.length > 0) return 'invalid_auction_completion'
     return null
   }
   if (changedOwnerIds.length !== 1 || Number(changedOwnerIds[0]) !== auction.tileId) {
@@ -375,6 +399,7 @@ export const validateAuctionTransition = (previous, next) => {
   const winnerId = next.owners[auction.tileId]
   const winner = previous.players.find((player) => player.id === winnerId)
   const nextWinner = next.players.find((player) => player.id === winnerId)
+  if (!winner || !nextWinner || eliminatedIds.has(winnerId) || auction.passedIds.includes(winnerId)) return 'invalid_auction_ownership'
   const winsWithNewBid = winnerId === auction.activeBidderId
   const winningBid = winsWithNewBid
     ? winner.money - nextWinner.money
@@ -389,6 +414,11 @@ export const validateAuctionTransition = (previous, next) => {
     nextWinner.money !== winner.money - winningBid ||
     playerMoneyChanged(previous, next, [winnerId])
   ) return 'invalid_auction_balance'
+  const competingBidders = auction.participantIds.filter((id) =>
+    id !== winnerId && (winsWithNewBid || id !== auction.activeBidderId) &&
+    !auction.passedIds.includes(id) && !eliminatedIds.has(id) &&
+    (previous.players.find((player) => player.id === id)?.money ?? 0) >= winningBid + 100)
+  if (competingBidders.length > 0) return 'invalid_auction_completion'
   return null
 }
 
