@@ -32,6 +32,7 @@ export function useOnlineLobby() {
   const pendingGameEventIdsRef = useRef(new Set<string>())
   const deferredGameStateRef = useRef<GameStateMessage | null>(null)
   const pendingTimeoutIdRef = useRef<string | null>(null)
+  const baseTurnKeyRef = useRef<string | null>(null)
   const lastLobbyActivitySentRef = useRef(0)
   const lastImmediateTurnSoundRef = useRef<string | null>(null)
   const lastImmediateTradeSoundRef = useRef<string | null>(null)
@@ -85,6 +86,7 @@ export function useOnlineLobby() {
       const deferredState = deferredGameStateRef.current
       deferredGameStateRef.current = null
       if (deferredState) {
+        baseTurnKeyRef.current = deferredState.turnKey ?? null
         setGameState(deferredState)
       }
     }
@@ -152,6 +154,7 @@ export function useOnlineLobby() {
           return
         }
         if (message.type === 'room_home') {
+          baseTurnKeyRef.current = null
           sessionEstablishedRef.current = true
           setLobby(null)
           setSession(null)
@@ -173,6 +176,8 @@ export function useOnlineLobby() {
           setStatus('online')
           setError('')
           if (message.lobby.status !== 'playing') {
+            baseTurnKeyRef.current = null
+            pendingTimeoutIdRef.current = null
             receivedGameEventIdsRef.current.clear()
             pendingGameEventIdsRef.current.clear()
             deferredGameStateRef.current = null
@@ -254,6 +259,7 @@ export function useOnlineLobby() {
           // The author already has this optimistic state. Reapplying intermediate
           // echoes makes its dialogs and token briefly jump to an older frame.
           if (message.senderId && message.senderId === playerIdRef.current) {
+            baseTurnKeyRef.current = message.turnKey ?? null
             return
           }
           // Movement and the following snapshots use the same ordered WebSocket
@@ -264,6 +270,7 @@ export function useOnlineLobby() {
               pendingGameEventIdsRef.current.clear()
               deferredGameStateRef.current = null
               setGameEvents([])
+              baseTurnKeyRef.current = message.turnKey ?? null
               setGameState(message)
               return
             }
@@ -273,6 +280,7 @@ export function useOnlineLobby() {
             }
             return
           }
+          baseTurnKeyRef.current = message.turnKey ?? null
           setGameState(message)
           return
         }
@@ -332,7 +340,10 @@ export function useOnlineLobby() {
 
   const publishGameState = useCallback((state: unknown) => {
     const timeoutId = pendingTimeoutIdRef.current
-    send({ type: 'game_snapshot', state, ...(timeoutId ? { timeoutId } : {}) })
+    send({ type: 'game_snapshot', state,
+      ...(baseTurnKeyRef.current ? { baseTurnKey: baseTurnKeyRef.current } : {}),
+      ...(timeoutId ? { timeoutId } : {}),
+    })
     pendingTimeoutIdRef.current = null
   }, [send])
   const acknowledgeGameEvent = useCallback((eventId: string) => {
@@ -343,6 +354,7 @@ export function useOnlineLobby() {
     const deferredState = deferredGameStateRef.current
     deferredGameStateRef.current = null
     if (deferredState) {
+      baseTurnKeyRef.current = deferredState.turnKey ?? null
       setGameState(deferredState)
     }
   }, [])

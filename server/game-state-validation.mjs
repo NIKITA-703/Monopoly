@@ -265,7 +265,12 @@ export const validateInitialGameState = (state) => {
 
 export const validateTradeResolution = (previous, next, senderId) => {
   const trade = previous?.tradeDraft
-  if (trade?.stage !== 'review' || next?.tradeDraft != null) return null
+  if (trade?.stage !== 'review') return null
+  if (next?.tradeDraft != null) {
+    return JSON.stringify(trade) === JSON.stringify(next.tradeDraft) &&
+      previous.activePlayerIndex === next.activePlayerIndex && previous.turnSequence === next.turnSequence
+      ? null : 'invalid_trade_review_change'
+  }
   if (senderId !== trade.targetPlayerId) return 'invalid_trade_responder'
 
   const previousPlayers = new Map(previous.players.map((player) => [player.id, player]))
@@ -351,6 +356,8 @@ export const validateAuctionTransition = (previous, next) => {
       !sameRecord(previous.mortgagedPropertyIds, next.mortgagedPropertyIds) ||
       playerMoneyChanged(previous, next)
     ) return 'invalid_auction_side_effect'
+    if (JSON.stringify(auction) === JSON.stringify(next.auction) &&
+      previous.activePlayerIndex === next.activePlayerIndex && previous.turnSequence === next.turnSequence) return null
     const bidderId = auction.activeBidderId
     const placedBid = next.auction.currentBid >= auction.currentBid + 100 &&
       next.auction.highestBidderId === bidderId

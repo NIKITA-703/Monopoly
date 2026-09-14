@@ -11,7 +11,7 @@ const port = 3600 + Math.floor(Math.random() * 400)
 const dataDirectory = mkdtempSync(join(tmpdir(), 'monopoly-rooms-'))
 const server = spawn(process.execPath, ['server/index.mjs'], {
   cwd: process.cwd(),
-  env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), DATA_DIR: dataDirectory, TURN_SECONDS: '5' },
+  env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), DATA_DIR: dataDirectory, TURN_SECONDS: '5', TRADE_SECONDS: '5', AUCTION_SECONDS: '2' },
   stdio: ['ignore', 'pipe', 'inherit'],
 })
 
@@ -192,7 +192,7 @@ try {
   }
   queues.set(reconnected.socket, queues.get(reconnected.socket).filter((message) => message.type !== 'game_state'))
   send(third, { type: 'game_snapshot', state: initialGameState, requestId: 'initial-public-game-state' })
-  const publicGameState = await waitFor(spectator.socket, (message) =>
+  let publicGameState = await waitFor(spectator.socket, (message) =>
     message.type === 'game_state' && message.gameId === startedLobby.lobby.gameId)
   assert.deepEqual(publicGameState.state.players.map((player) => player.id), startedPlayerIds)
   assert.ok(
@@ -200,10 +200,42 @@ try {
     'Состояние игры не должно отправляться участникам другой комнаты',
   )
 
-  // Only one connected client remains in this game. If it fails to complete
-  // an auto-turn, the next lease must work even for that same client.
+  const targetId = publicGameState.state.players[1].id
+  send(third, { type: 'game_snapshot', baseTurnKey: publicGameState.turnKey, state: {
+    ...publicGameState.state,
+    tradeDraft: { stage: 'review', targetPlayerId: targetId, offeredMoney: 100, requestedMoney: 0, offeredTileIds: [], requestedTileIds: [] },
+  } })
+  const offer = await waitFor(third.socket, (message) => message.type === 'game_state' && message.state.tradeDraft?.stage === 'review')
   spectator.socket.close()
   await once(spectator.socket, 'close')
+  const expiredOffer = await waitFor(third.socket, (message) =>
+    message.type === 'game_state' && message.senderId === 'server' && message.state.tradeDraft === null, 7000)
+  assert.deepEqual(expiredOffer.state.players, offer.state.players, 'An offline target must not accept or pay for an expired offer')
+  assert.ok(expiredOffer.turnDeadline > Date.now())
+  send(third, { type: 'game_snapshot', baseTurnKey: offer.turnKey, state: offer.state })
+  const staleCorrection = await waitFor(third.socket, (message) => message.type === 'game_state' && message.resyncId)
+  assert.equal(staleCorrection.state.tradeDraft, null, 'A late snapshot cannot reopen the expired offer')
+
+  send(third, { type: 'game_snapshot', baseTurnKey: expiredOffer.turnKey, state: {
+    ...expiredOffer.state, pendingTileId: 1,
+    players: expiredOffer.state.players.map((player, index) => index === 0 ? { ...player, position: 1 } : player),
+  } })
+  const purchase = await waitFor(third.socket, (message) => message.type === 'game_state' && message.state.pendingTileId === 1)
+  send(third, { type: 'game_snapshot', baseTurnKey: purchase.turnKey, state: {
+    ...purchase.state, pendingTileId: null,
+    auction: { tileId: 1, participantIds: [targetId], activeBidderId: targetId, currentBid: 600, highestBidderId: null, passedIds: [] },
+  } })
+  const offlineAuction = await waitFor(third.socket, (message) => message.type === 'game_state' && message.state.auction?.tileId === 1)
+  send(third, { type: 'chat_message', text: 'таймер аукциона не продлевается сообщениями' })
+  const auctionChat = await waitFor(third.socket, (message) => message.type === 'game_state' && message.state.logs.some((entry) => entry.text.includes('таймер аукциона')))
+  assert.equal(auctionChat.turnDeadline, offlineAuction.turnDeadline)
+  publicGameState = await waitFor(third.socket, (message) =>
+    message.type === 'game_state' && message.senderId === 'server' && !message.state.auction &&
+    message.state.turnSequence > offlineAuction.state.turnSequence, 4000)
+  assert.equal(publicGameState.state.owners[1], undefined, 'An offline sole bidder passes without buying')
+
+  // Only one connected client remains in this game. If it fails to complete
+  // an auto-turn, the next lease must work even for that same client.
   const firstTimeout = await waitFor(third.socket, (message) =>
     message.type === 'turn_timeout_granted' && message.gameId === startedLobby.lobby.gameId, 7000)
   const retryTimeout = await waitFor(third.socket, (message) =>

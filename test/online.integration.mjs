@@ -410,19 +410,8 @@ try {
   assert.equal(correctedAuction.turnDeadline, auctionSnapshot.turnDeadline, 'Rejected bids do not extend the timer')
   send(first, { type: 'client_presence', visible: false })
   send(second, { type: 'client_presence', visible: true })
-  const auctionTimeout = await waitFor(second.socket, (message) =>
-    message.type === 'turn_timeout_granted' && message.actorId === ids[1], 4000)
-  assert.equal(
-    auctionTimeout.actorId,
-    ids[1],
-    'Сервер должен поручить таймаут активной вкладке, даже когда ходит другой игрок',
-  )
-  send(second, {
-    type: 'game_snapshot', timeoutId: auctionTimeout.timeoutId,
-    state: { ...auctionSnapshot.state, auction: { ...auctionSnapshot.state.auction, passedIds: [ids[1]], activeBidderId: ids[2] } },
-  })
   let passingAuction = await waitFor(third.socket, (message) =>
-    message.type === 'game_state' && message.state.auction?.activeBidderId === ids[2])
+    message.type === 'game_state' && message.senderId === 'server' && message.state.auction?.activeBidderId === ids[2], 4000)
   assert.ok(passingAuction.turnDeadline > auctionSnapshot.turnDeadline, 'The next bidder gets a fresh deadline')
   assert.deepEqual(passingAuction.state.missedTurnCounts, auctionSnapshot.state.missedTurnCounts, 'Auction timeout does not count as a missed normal turn')
   for (let index = 2; index < ids.length; index += 1) {

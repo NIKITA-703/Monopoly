@@ -8,6 +8,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import { createAuditLog } from './audit-log.mjs'
 import { createRoomStore, installRoomSchema } from './room-store.mjs'
 import { preservePendingBookBonuses } from '../shared/book-bonus.mjs'
+import { resolveDecisionTimeout } from './decision-timeouts.mjs'
 import {
   validateAuctionTransition,
   validateCasinoTransition,
@@ -286,13 +287,14 @@ const broadcastRoomHome = () => {
 }
 
 const sendStoredGameState = (socket, gameId, resync = false) => {
-  const game = database.prepare('SELECT state_json, updated_at, turn_deadline FROM games WHERE id = ?').get(gameId)
+  const game = database.prepare('SELECT state_json, updated_at, turn_deadline, turn_key FROM games WHERE id = ?').get(gameId)
   if (!game?.state_json) return
   send(socket, {
     type: 'game_state',
     gameId,
     revision: game.updated_at,
     turnDeadline: game.turn_deadline,
+    turnKey: game.turn_key,
     ...(resync ? { resyncId: randomUUID() } : {}),
     state: JSON.parse(game.state_json),
   })
@@ -311,7 +313,7 @@ const broadcastToGame = (gameId, message) => {
 }
 
 const broadcastGameState = (gameId, state, revision, turnDeadline, senderId = null) => {
-  broadcastToGame(gameId, { type: 'game_state', gameId, revision, turnDeadline, senderId, state })
+  broadcastToGame(gameId, { type: 'game_state', gameId, revision, turnDeadline, turnKey: getTurnKey(state), senderId, state })
 }
 
 const getTurnActorId = (state) => {
@@ -959,6 +961,11 @@ const handleLobbyMessage = (socket, token, message) => {
     const state = message.state
     if (!state || typeof state !== 'object' || !Array.isArray(state.players)) return
     const storedGame = database.prepare('SELECT state_json, updated_at, turn_key, turn_deadline FROM games WHERE id = ?').get(room.game_id)
+    if (typeof message.baseTurnKey === 'string' && message.baseTurnKey !== storedGame?.turn_key) {
+      trace('snapshot_rejected', { gameId: room.game_id, senderId: publicPlayerId(token), reason: 'stale_decision' })
+      sendStoredGameState(socket, room.game_id, true)
+      return
+    }
     const storedState = storedGame?.state_json ? JSON.parse(storedGame.state_json) : null
     // Клиент не может удалить отметки уже выданных сервером наград.
     state.serverEconomy = storedState?.serverEconomy ?? { rewardKeys: [] }
@@ -1063,6 +1070,7 @@ const handleLobbyMessage = (socket, token, message) => {
         reason: tradeResolutionError,
       })
       send(socket, { type: 'action_error', message: 'Сервер отклонил некорректный обмен' })
+      sendStoredGameState(socket, room.game_id, true)
       return
     }
     const economyTransitionError = storedState
@@ -1401,12 +1409,28 @@ setInterval(() => {
 
 const processTurnTimeout = (room) => {
   if (room.status !== 'playing' || !room.game_id) return
-  const game = database.prepare('SELECT state_json, turn_key, turn_deadline FROM games WHERE id = ?').get(room.game_id)
+  const game = database.prepare('SELECT state_json, updated_at, turn_key, turn_deadline FROM games WHERE id = ?').get(room.game_id)
   if (!game?.state_json || !game.turn_deadline || game.turn_deadline > Date.now()) return
 
   const state = JSON.parse(game.state_json)
   if (state.winnerId) {
     scheduleGameReturnToLobby(room.game_id)
+    return
+  }
+  const resolution = resolveDecisionTimeout(state, tileNames)
+  if (resolution) {
+    const now = Date.now()
+    const next = resolution.state
+    const time = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' }).format(now)
+    next.logs = [...(next.logs ?? []), ...resolution.events.map((event) => ({ ...event, id: randomUUID(), time }))]
+    const revision = Math.max(now, Number(game.updated_at ?? 0) + 1)
+    const deadline = now + (next.auction ? auctionDecisionDuration : turnDuration)
+    database.prepare('UPDATE games SET state_json = ?, updated_at = ?, turn_key = ?, turn_deadline = ? WHERE id = ?')
+      .run(JSON.stringify(next), revision, getTurnKey(next), deadline, room.game_id)
+    timeoutControllers.delete(room.game_id)
+    turnActionControllers.delete(room.game_id)
+    broadcastGameState(room.game_id, next, revision, deadline, 'server')
+    trace('decision_timeout_resolved', { gameId: room.game_id, before: summarizeGameState(state), after: summarizeGameState(next) })
     return
   }
   const actorId = getTurnActorId(state)
